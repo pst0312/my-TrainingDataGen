@@ -215,6 +215,14 @@ def plot_spectrum(df: pd.DataFrame, spectra: dict, technique: str, config: dict,
 
 
 if __name__ == "__main__":
+    import sys
+    # Get optional index argument
+    index = None
+    if len(sys.argv) > 1:
+        try:
+            index = int(sys.argv[1])
+        except Exception:
+            index = None
     print("=" * 80)
     print("  Synthetic Spectrum Generator — Multi-Line Instance")
     print("=" * 80)
@@ -249,7 +257,10 @@ if __name__ == "__main__":
     print(f"\nDataFrame statistics (by line):")
     print(df.groupby("line_id")[["energy", "intensity"]].describe())
     # Save to CSV
-    csv_filename = f"spectrum_data_{technique.lower()}_multiline.csv"
+    if index is not None:
+        csv_filename = f"spectrum_data_{technique.lower()}_multiline_{index}.csv"
+    else:
+        csv_filename = f"spectrum_data_{technique.lower()}_multiline.csv"
     df.to_csv(csv_filename, index=False)
     print(f"\n✓ Data saved: {csv_filename}")
     # Display line summary
@@ -261,7 +272,65 @@ if __name__ == "__main__":
     # Create visualization
     print(f"\nGenerating multi-line plot...")
     plot_func = plot_spectrum(df, spectra, technique, config, style)
-    plot_func(same_color=SAME_COLOR)
+    if index is not None:
+        png_filename = f"spectrum_{technique.lower()}_multiline_{index}.png"
+    else:
+        png_filename = f"spectrum_{technique.lower()}_multiline.png"
+    # Patch the plot function to save with the correct filename
+    def patched_plot_func(same_color=False):
+        vs = style["visual_style"]
+        fig, ax = plt.subplots(figsize=(12, 7))
+        color_palette = [
+            vs.get("line_color", "#1A3A6B"),
+            "#C41E3A",
+            "#2E8B57",
+            "#FF8C00",
+            "#663399",
+        ]
+        linestyle_palette = ["-", "--", "-.", ":", "-"]
+        for idx, (line_id, (x, y)) in enumerate(spectra.items()):
+            if same_color:
+                color = vs.get("line_color", "#1A3A6B")
+            else:
+                color = color_palette[idx % len(color_palette)]
+            linestyle = linestyle_palette[idx % len(linestyle_palette)]
+            ax.plot(
+                x,
+                y,
+                color=color,
+                linewidth=vs.get("line_width", 1.5),
+                linestyle=linestyle,
+                label=f"Line {line_id}",
+                alpha=0.85,
+            )
+        x_units = config.get("x_units", "eV")
+        y_label = config.get("y_axis", "Intensity")
+        y_units = config.get("y_units", "a.u.")
+        ax.set_xlabel(f"{config.get('x_axis', 'Energy')} ({x_units})", fontsize=12)
+        ax.set_ylabel(f"{y_label} ({y_units})", fontsize=12)
+        ax.set_title(f"Synthetic {technique} Spectrum — {len(spectra)} Lines", fontsize=14, fontweight="bold")
+        if vs.get("grid_visible", True):
+            ax.grid(True, linestyle=vs.get("grid_linestyle", "--"), alpha=vs.get("grid_alpha", 0.35))
+        ax.set_facecolor(vs.get("background_color", "#FFFFFF"))
+        fig.patch.set_facecolor(vs.get("figure_facecolor", "#F7F7F7"))
+        wm = style.get("watermark", {})
+        if wm.get("enabled", True):
+            ax.text(
+                0.5, 0.95,
+                wm.get("text", f"{technique} — SYNTHETIC"),
+                transform=ax.transAxes,
+                fontsize=wm.get("font_size", 10),
+                color=wm.get("font_color", "#CC0000"),
+                alpha=wm.get("font_alpha", 0.28),
+                ha="center",
+                va="top",
+                rotation=wm.get("rotation_deg", 30),
+            )
+        ax.legend(loc="upper right", fontsize=10, framealpha=0.95)
+        plt.tight_layout()
+        plt.savefig(png_filename, dpi=100, bbox_inches="tight")
+        print(f"✓ Plot saved: {png_filename}")
+    patched_plot_func(same_color=SAME_COLOR)
     print("\n" + "=" * 80)
     print("  Generation complete!")
     print("=" * 80)

@@ -15,7 +15,7 @@ def main():
     for i in range(1, n + 1):
         print(f"\n--- Generating spectrum {i} of {n} ---")
         try:
-            subprocess.run([sys.executable, "spectrum_generator.py"], check=True)
+            subprocess.run([sys.executable, "spectrum_generator.py", str(i)], check=True)
         except subprocess.CalledProcessError as e:
             print(f"Error running spectrum_generator.py: {e}")
             break
