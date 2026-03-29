@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Spectrum Generator",
+            "type": "shell",
+            "command": ".venv\\Scripts\\python.exe",
+            "args": [
+                "spectrum_generator.py"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "isBackground": false
+        }
+    ]
+}
