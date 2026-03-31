@@ -3,14 +3,15 @@ spectrum_generator.py
 =====================
 Generate realistic synthetic spectra using physics-based peak models and
 material libraries. Applies advanced line shapes (Lorentzian, Voigt),
-realistic backgrounds (Shirley, Bremsstrahlung), and visual degradation.
+realistic backgrounds (Shirley, Bremsstrahlung), visual degradation, and
+trailing lines for cross-polarization simulation.
 
 This script:
-  1. Selects a random spectroscopy technique and material
-  2. Pulls characteristic peaks from PEAK_LIBRARY
-  3. Generates synthetic spectrum with physical line shapes
-  4. Applies realistic backgrounds and noise
-  5. Renders plot with visual degradation (blur, downsampling, JPEG artifacts)
+  1. Accepts complexity ranges for both data and visual axes
+  2. Selects a technique matching target data complexity
+  3. Generates trailing lines for high-complexity data
+  4. Applies physics-based peak synthesis
+  5. Renders plot with visual degradation scaled to visual complexity
   6. Stores the data in a pandas DataFrame
 """
 
@@ -21,6 +22,7 @@ from scipy import special, ndimage
 from PIL import Image
 import io
 import random
+import argparse
 from SpectDict import ESI_CONFIG, PLOT_STYLE_CONFIG, PEAK_LIBRARY
 
 
@@ -160,11 +162,13 @@ def generate_synthetic_data(
     material: str = None,
     n_points: int = 2048,
     n_lines: int = 1,
+    data_complexity: int = 5,
     seed: int = None,
 ) -> dict:
     """
     Generate realistic synthetic spectra with physics-based line shapes
-    and material-specific peak positions from PEAK_LIBRARY.
+    and material-specific peak positions from PEAK_LIBRARY. Optionally includes
+    trailing lines for cross-polarization simulation (high complexity data).
     
     Parameters
     ----------
@@ -178,13 +182,17 @@ def generate_synthetic_data(
         Number of data points per spectrum
     n_lines : int
         Number of independent lines to generate (1-5)
+    data_complexity : int
+        Complexity score (1-10) controlling trailing line probability and n_lines.
+        1 = simple single line, 10 = complex multi-line with trailing lines
     seed : int
         Random seed for reproducibility
         
     Returns
     -------
     dict
-        Dictionary mapping line_id to (x, y) tuples
+        Dictionary mapping line_id to (x, y) tuples. Includes trailing lines
+        (identified with _trailing suffix) when data_complexity is high.
     """
     if seed is not None:
         np.random.seed(seed)
@@ -307,6 +315,80 @@ def generate_synthetic_data(
         y += (line_id - 1) * np.random.uniform(5, 20)
         
         spectra[line_id] = (x, y)
+        
+        # ============================================================
+        # TRAILING LINE GENERATION (cross-polarization, high complexity)
+        # ============================================================
+        # At high data_complexity, generate trailing lines for some primary lines.
+        # A trailing line shares the exact same x-axis and peak positions, but with
+        # reduced overall intensity (0.3-0.7x), simulating cross-polarized measurements
+        # or secondary optical correlations.
+        
+        trailing_probability = min(0.7, data_complexity / 10.0)  # up to 70% chance
+        if data_complexity >= 6 and np.random.random() < trailing_probability:
+            # Create trailing line with same peaks but reduced intensity
+            y_trailing = np.zeros_like(x)
+            trailing_intensity_scale = np.random.uniform(0.3, 0.7)
+            
+            if material and material in PEAK_LIBRARY:
+                peak_data = PEAK_LIBRARY[material].get(technique, {}).get("peaks", [])
+                for peak_info in peak_data:
+                    pos = peak_info["position"]
+                    intensity = peak_info["intensity"] * trailing_intensity_scale * np.random.uniform(0.85, 1.15)
+                    fwhm = peak_info["fwhm"] * np.random.uniform(0.9, 1.1)
+                    
+                    line_shape = config.get("peak_shape", "Gaussian")
+                    if line_shape == "Gaussian":
+                        y_trailing += gaussian(x, pos, fwhm, intensity)
+                    elif line_shape == "Lorentzian":
+                        y_trailing += lorentzian(x, pos, fwhm, intensity)
+                    elif line_shape == "Voigt":
+                        y_trailing += voigt(x, pos, fwhm * 0.7, fwhm * 0.3, intensity)
+                    else:
+                        y_trailing += gaussian(x, pos, fwhm, intensity)
+            else:
+                # Fallback: scale primary line peaks
+                # Re-synthesize with same positions but reduced intensity
+                num_peaks = np.random.randint(2, 6)
+                peak_positions = np.random.uniform(x_lo, x_hi, num_peaks)
+                peak_widths = np.random.uniform(5, 50, num_peaks)
+                line_shape = config.get("peak_shape", "Gaussian")
+                for pos, width in zip(peak_positions, peak_widths):
+                    height = 100 * trailing_intensity_scale
+                    if line_shape == "Lorentzian":
+                        y_trailing += lorentzian(x, pos, width, height)
+                    elif line_shape == "Voigt":
+                        y_trailing += voigt(x, pos, width * 0.7, width * 0.3, height)
+                    else:
+                        y_trailing += gaussian(x, pos, width, height)
+            
+            # Add same background and noise
+            bg_type = config.get("background_type", "Linear")
+            if bg_type == "Shirley":
+                temp_y_trailing = np.copy(y_trailing) + np.random.normal(0, 0.5, n_points)
+                bg = shirley_background(x, temp_y_trailing, n_iter=5)
+                y_trailing += bg * 0.5  # scale background for trailing line
+            elif bg_type == "Bremsstrahlung":
+                x_min = x_lo
+                bg = bremsstrahlung_background(x, x_min, intensity=np.max(y_trailing) * 0.3, k=1.7)
+                y_trailing += bg * 0.5
+            elif bg_type == "Polynomial" or "Polynomial" in bg_type:
+                bg = polynomial_baseline(x, degree=np.random.randint(1, 3))
+                bg = np.maximum(bg, 0)
+                bg_scaled = bg * np.max(y_trailing) * 0.1
+                y_trailing += bg_scaled
+            elif "Power" in bg_type:
+                y_trailing += 50 * np.exp(-0.001 * (x - x_lo)) * 0.5
+            else:
+                y_trailing += np.linspace(5, 20, n_points) * 0.5
+            
+            # Add noise
+            y_trailing += np.random.normal(0, gaussian_sigma * np.max(y_trailing) * 0.01, n_points)
+            y_trailing = np.maximum(y_trailing, 0)
+            y_trailing += np.random.poisson(poisson_lambda / 20000, n_points) / 100
+            
+            # Store trailing line with special key
+            spectra["{0}_trailing".format(line_id)] = (x, y_trailing)
     
     return spectra
 
@@ -342,38 +424,53 @@ def create_dataframe(spectra: dict, technique: str) -> pd.DataFrame:
     return df
 
 
-def apply_visual_degradation(fig_path: str, low_res_config: dict, dpi: int = 100):
+def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complexity: int = 5, dpi: int = 100):
     """
-    Apply visual degradation effects to rendered spectrum image:
-    - Gaussian blur (instrument response simulation)
-    - Downsampling (pixel density reduction)
-    - JPEG compression (digital artifact simulation)
-    - Scan lines (CRT/scanner row artifacts)
+    Apply visual degradation effects to rendered spectrum image.
+    Severity of degradation is scaled by visual_complexity (1-10).
     
     Parameters
     ----------
     fig_path : str
         Path to PNG image file
     low_res_config : dict
-        Configuration with keys: blur_sigma_px, downsample_factor, jpeg_quality, etc.
+        Base configuration with keys: blur_sigma_px, downsample_factor, jpeg_quality, etc.
+    visual_complexity : int
+        Complexity score (1-10) that scales degradation severity
+        1 = pristine, no degradation
+        10 = maximum degradation
     dpi : int
         Original image DPI (used for scan line calculations)
     """
     if not low_res_config.get("enabled", True):
         return
     
+    # Clamp visual_complexity to valid range
+    visual_complexity = max(1, min(visual_complexity, 10))
+    
+    # Scale degradation parameters based on complexity
+    # complexity 1 → scale 0.0 (no degradation)
+    # complexity 5 → scale 0.5 (medium degradation)
+    # complexity 10 → scale 1.0 (full degradation)
+    degradation_scale = (visual_complexity - 1) / 9.0
+    
     # Load image
     img = Image.open(fig_path).convert("RGB")
     img_array = np.array(img, dtype=np.float32) / 255.0
     
-    # ====== BLUR ======
-    blur_sigma = low_res_config.get("blur_sigma_px", 0.0)
-    if blur_sigma > 0:
+    # ====== BLUR (scaled) ======
+    base_blur_sigma = low_res_config.get("blur_sigma_px", 0.0)
+    blur_sigma = base_blur_sigma * degradation_scale
+    if blur_sigma > 0.1:  # Apply only if noticeable
         for ch in range(3):
             img_array[:, :, ch] = ndimage.gaussian_filter(img_array[:, :, ch], sigma=blur_sigma)
     
-    # ====== DOWNSAMPLING ======
-    downsample_factor = low_res_config.get("downsample_factor", 1)
+    # ====== DOWNSAMPLING (scaled) ======
+    base_downsample = low_res_config.get("downsample_factor", 1)
+    # Scale downsampling: at complexity 1, use 1 (no downsampling)
+    # at complexity 10, use full base_downsample
+    downsample_factor = int(1 + (base_downsample - 1) * degradation_scale)
+    
     if downsample_factor > 1:
         h, w = img_array.shape[:2]
         # Simple mean pooling
@@ -392,27 +489,31 @@ def apply_visual_degradation(fig_path: str, low_res_config: dict, dpi: int = 100
         # Crop to original size if needed
         img_array = img_array[:h, :w]
     
-    # ====== SCAN LINES ======
-    if low_res_config.get("add_scan_lines", False):
+    # ====== SCAN LINES (scaled) ======
+    if degradation_scale > 0.1 and low_res_config.get("add_scan_lines", False):
         spacing = low_res_config.get("scan_line_spacing", 4)
-        alpha = low_res_config.get("scan_line_alpha", 0.1)
+        base_alpha = low_res_config.get("scan_line_alpha", 0.1)
+        alpha = base_alpha * degradation_scale  # Scale alpha with complexity
         h = img_array.shape[0]
         for i in range(0, h, spacing):
             img_array[i, :] = img_array[i, :] * (1 - alpha)  # darken scan line
     
-    # ====== PAPER GRAIN (IR) ======
-    if low_res_config.get("paper_grain", False):
-        grain_sigma = low_res_config.get("paper_grain_sigma", 1.5)
+    # ====== PAPER GRAIN (IR, scaled) ======
+    if degradation_scale > 0.1 and low_res_config.get("paper_grain", False):
+        grain_sigma = low_res_config.get("paper_grain_sigma", 1.5) * degradation_scale
         grain = np.random.normal(0, grain_sigma / 255.0, img_array.shape)
         img_array = np.clip(img_array + grain, 0, 1)
     
-    # Convert back to uint8 and save as JPEG (if quality specified)
+    
+    # Convert back to uint8 and save as JPEG (if quality specified, scaled by complexity)
     img_array = (np.clip(img_array, 0, 1) * 255).astype(np.uint8)
     img_out = Image.fromarray(img_array)
     
-    jpeg_quality = low_res_config.get("jpeg_quality", None)
-    if jpeg_quality is not None and jpeg_quality < 95:
-        # Compress with JPEG to introduce artifacts
+    base_jpeg_quality = low_res_config.get("jpeg_quality", None)
+    if base_jpeg_quality is not None and base_jpeg_quality < 95:
+        # Scale JPEG quality: at complexity 1, high quality (95)
+        # at complexity 10, use base_jpeg_quality
+        jpeg_quality = 95 - (95 - base_jpeg_quality) * degradation_scale
         img_out.save(fig_path, "JPEG", quality=int(jpeg_quality))
     else:
         img_out.save(fig_path, "PNG")
@@ -451,10 +552,25 @@ def plot_spectrum(df: pd.DataFrame, spectra: dict, technique: str, config: dict,
     ]
     linestyle_palette = ["-", "--", "-.", ":", "-"]
     
-    # Plot each line
+    # Plot each line (including trailing lines if present)
+    plotted_lines = set()
     for idx, (line_id, (x, y)) in enumerate(spectra.items()):
-        color = color_palette[idx % len(color_palette)]
-        linestyle = linestyle_palette[idx % len(linestyle_palette)]
+        is_trailing = isinstance(line_id, str) and "_trailing" in line_id
+        
+        if is_trailing:
+            # Trailing line: use trailing_line_style from config, same color as parent
+            parent_id = int(line_id.split("_")[0])
+            color = color_palette[(parent_id - 1) % len(color_palette)]
+            linestyle = vs.get("trailing_line_style", "--")
+            label = f"Line {parent_id} (cross-polarized)"
+            alpha = 0.6
+        else:
+            # Primary line
+            color = color_palette[idx % len(color_palette)]
+            linestyle = linestyle_palette[idx % len(linestyle_palette)]
+            label = f"Line {line_id}"
+            alpha = 0.85
+            plotted_lines.add(line_id)
         
         ax.plot(
             x,
@@ -462,8 +578,8 @@ def plot_spectrum(df: pd.DataFrame, spectra: dict, technique: str, config: dict,
             color=color,
             linewidth=vs.get("line_width", 1.5),
             linestyle=linestyle,
-            label=f"Line {line_id}",
-            alpha=0.85,
+            label=label,
+            alpha=alpha,
         )
     
     # Fill under curve if enabled
@@ -522,9 +638,9 @@ def plot_spectrum(df: pd.DataFrame, spectra: dict, technique: str, config: dict,
     return (fig, ax)
     
 
-def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: dict = None) -> str:
+def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: dict = None, visual_complexity: int = 5) -> str:
     """
-    Save spectrum plot with optional visual degradation.
+    Save spectrum plot with optional visual degradation scaled by visual_complexity.
     
     Parameters
     ----------
@@ -535,7 +651,9 @@ def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: d
     index : int, optional
         Index for filename
     low_res_config : dict, optional
-        Low-resolution degradation config
+        Low-resolution degradation config (base settings)
+    visual_complexity : int
+        Visual complexity score (1-10) that scales degradation severity
     
     Returns
     -------
@@ -550,10 +668,10 @@ def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: d
     fig.savefig(png_filename, dpi=100, bbox_inches="tight")
     print(f"✓ Plot saved (initial): {png_filename}")
     
-    # Apply visual degradation
+    # Apply visual degradation scaled by visual_complexity
     if low_res_config and low_res_config.get("enabled", False):
-        apply_visual_degradation(png_filename, low_res_config, dpi=100)
-        print(f"✓ Visual degradation applied: {png_filename}")
+        apply_visual_degradation(png_filename, low_res_config, visual_complexity=visual_complexity, dpi=100)
+        print(f"✓ Visual degradation applied (complexity {visual_complexity}/10): {png_filename}")
     
     return png_filename
 
@@ -561,46 +679,93 @@ def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: d
 if __name__ == "__main__":
     import sys
     
-    # Get optional index argument
-    index = None
-    if len(sys.argv) > 1:
-        try:
-            index = int(sys.argv[1])
-        except Exception:
-            index = None
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Generate realistic synthetic spectroscopy data with controllable data and visual complexity."
+    )
+    parser.add_argument("index", nargs="?", type=int, default=None, help="Optional index for output files")
+    parser.add_argument("--min-vis", type=int, default=1, help="Minimum visual complexity (1-10)")
+    parser.add_argument("--max-vis", type=int, default=10, help="Maximum visual complexity (1-10)")
+    parser.add_argument("--min-data", type=int, default=1, help="Minimum data complexity (1-10)")
+    parser.add_argument("--max-data", type=int, default=10, help="Maximum data complexity (1-10)")
+    
+    args = parser.parse_args()
+    
+    # Validate and clamp complexity ranges
+    min_vis = max(1, min(args.min_vis, 10))
+    max_vis = max(1, min(args.max_vis, 10))
+    min_data = max(1, min(args.min_data, 10))
+    max_data = max(1, min(args.max_data, 10))
+    
+    # Ensure min <= max
+    if min_vis > max_vis:
+        min_vis, max_vis = max_vis, min_vis
+    if min_data > max_data:
+        min_data, max_data = max_data, min_data
+    
+    # Select random complexity scores within provided ranges
+    target_visual_complexity = np.random.randint(min_vis, max_vis + 1)
+    target_data_complexity = np.random.randint(min_data, max_data + 1)
     
     print("=" * 90)
-    print("  Synthetic Spectrum Generator — Physics-Based Multi-Line Instance")
+    print("  Synthetic Spectrum Generator — Two-Axis Complexity Control")
     print("=" * 90)
+    print(f"\nComplexity Targets:")
+    print(f"  Data Complexity: {target_data_complexity}/10 (range: {min_data}-{max_data})")
+    print(f"  Visual Complexity: {target_visual_complexity}/10 (range: {min_vis}-{max_vis})")
     
-    # Select a random technique
-    technique = random.choice(list(ESI_CONFIG.keys()))
+    # Filter techniques by base_data_complexity (within ±2 of target)
+    suitable_techniques = []
+    for tech, config in ESI_CONFIG.items():
+        base_complexity = config.get("base_data_complexity", 5)
+        if abs(base_complexity - target_data_complexity) <= 2:
+            suitable_techniques.append(tech)
+    
+    # If no suitable techniques, use all
+    if not suitable_techniques:
+        suitable_techniques = list(ESI_CONFIG.keys())
+    
+    technique = random.choice(suitable_techniques)
     config = ESI_CONFIG[technique]
     style = PLOT_STYLE_CONFIG[technique]
+    base_data_complexity = config.get("base_data_complexity", 5)
     
-    # Randomly select material from available options for this technique
+    # Select material randomly from available options
     available_materials = [
         m for m in PEAK_LIBRARY
         if technique in PEAK_LIBRARY[m]
     ]
     material = random.choice(available_materials) if available_materials else None
     
-    # Randomly select 1-5 lines to generate
-    num_lines = np.random.randint(1, 6)
+    # Scale n_lines based on data complexity (1-5 range)
+    # Low complexity (1-2) → 1 line
+    # Medium complexity (4-6) → 2-3 lines
+    # High complexity (9-10) → 4-5 lines
+    if target_data_complexity <= 3:
+        num_lines = 1
+    elif target_data_complexity <= 5:
+        num_lines = np.random.randint(1, 3)
+    elif target_data_complexity <= 7:
+        num_lines = np.random.randint(2, 4)
+    else:
+        num_lines = np.random.randint(3, 6)
     
     print(f"\nSelected technique: {technique}")
+    print(f"  Base data complexity: {base_data_complexity}/10")
     if material:
-        print(f"Selected material: {material}")
-    print(f"Number of lines to generate: {num_lines}")
+        print(f"  Selected material: {material}")
+    print(f"  Number of lines to generate: {num_lines}")
+    print(f"  Trailing lines likely: {'Yes' if target_data_complexity >= 6 else 'No'}")
     
-    # Generate synthetic spectra (multiple lines, physics-based)
-    print(f"Generating synthetic spectra...")
+    # Generate synthetic spectra with both complexity axes
+    print(f"\nGenerating synthetic spectra...")
     spectra = generate_synthetic_data(
         technique=technique,
         config=config,
         material=material,
         n_points=2048,
         n_lines=num_lines,
+        data_complexity=target_data_complexity,
         seed=42,  # For reproducibility
     )
     
@@ -616,16 +781,22 @@ if __name__ == "__main__":
     print(df.groupby("line_id")[["energy", "intensity"]].describe())
     
     # Save to CSV
-    if index is not None:
-        csv_filename = f"spectrum_data_{technique.lower()}_multiline_{index}.csv"
+    if args.index is not None:
+        csv_filename = f"spectrum_data_{technique.lower()}_multiline_{args.index}.csv"
     else:
         csv_filename = f"spectrum_data_{technique.lower()}_multiline.csv"
     df.to_csv(csv_filename, index=False)
     print(f"\n✓ Data saved: {csv_filename}")
     
-    # Display line summary
+    # Display line summary (handle both int and string line IDs)
     print(f"\nLine Summary:")
-    for line_id in sorted(df['line_id'].unique()):
+    # Sort line IDs with custom logic (ints first, then strings)
+    line_ids = df['line_id'].unique()
+    int_ids = sorted([lid for lid in line_ids if isinstance(lid, int)])
+    str_ids = sorted([lid for lid in line_ids if isinstance(lid, str)])
+    sorted_line_ids = int_ids + str_ids
+    
+    for line_id in sorted_line_ids:
         line_data = df[df['line_id'] == line_id]
         print(f"  Line {line_id}: {len(line_data)} points | "
               f"Intensity range: {line_data['intensity'].min():.2f} – {line_data['intensity'].max():.2f}")
@@ -634,16 +805,19 @@ if __name__ == "__main__":
     print(f"\nGenerating multi-line plot with visual degradation...")
     fig, ax = plot_spectrum(df, spectra, technique, config, style)
     
-    # Save with visual degradation
+    # Save with visual degradation scaled to visual_complexity
     png_filename = save_spectrum_plot(
         fig,
         technique,
-        index=index,
-        low_res_config=style.get("low_res", {})
+        index=args.index,
+        low_res_config=style.get("low_res", {}),
+        visual_complexity=target_visual_complexity
     )
     
     plt.close(fig)
     
     print("\n" + "=" * 90)
-    print("  Generation complete! (Physics-based, material library, visual degradation)")
+    print("  Generation complete!")
+    print("  Data complexity is decoupled from visual complexity")
+    print("  Complex data may appear pristine; simple data may appear degraded")
     print("=" * 90)

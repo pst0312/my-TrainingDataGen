@@ -53,6 +53,7 @@ ESI_CONFIG: Dict[str, SpecConfig] = {
         "energy_reference": "Fermi Level",
         "charge_correction_eV": 0.0,          # set >0 for insulating samples
         "pass_energy_eV"  : 20.0,             # analyser pass energy (high-res mode)
+        "base_data_complexity": 4,            # moderate overlap of sample-dependent elements
     },
 
     # -----------------------------------------------------------------------
@@ -76,6 +77,7 @@ ESI_CONFIG: Dict[str, SpecConfig] = {
         "primary_beam_keV": 5.0,                # incident electron energy
         "modulation_eV"   : 2.0,                # lock-in amplifier modulation voltage
         "derivative_order": 1,                  # 1 = dN/dE, 2 = d²N/dE² (rare)
+        "base_data_complexity": 5,              # moderate-high; derivative peaks can overlap
     },
 
     # -----------------------------------------------------------------------
@@ -100,6 +102,7 @@ ESI_CONFIG: Dict[str, SpecConfig] = {
         "detector_type"   : "SDD",             # Silicon Drift Detector
         "takeoff_angle_deg": 35.0,             # specimen-to-detector geometry
         "dead_time_pct"   : 20.0,              # target dead-time for live-time correction
+        "base_data_complexity": 2,             # low; elemental X-ray lines are well-separated
     },
 
     # -----------------------------------------------------------------------
@@ -125,6 +128,7 @@ ESI_CONFIG: Dict[str, SpecConfig] = {
         "convergence_angle_mrad": 10.0,         # α convergence semi-angle
         "accelerating_kV" : 200.0,             # TEM accelerating voltage (kV)
         "thickness_lambda": 0.5,               # specimen thickness in units of MFP
+        "base_data_complexity": 7,             # high; multiple overlapping ionization edges
         "regions": {                            # named spectral regions for segmentation
             "zero_loss"  : (-5.0,   5.0),      # eV
             "low_loss"   : (  5.0,  50.0),     # plasmons, inter-band transitions
@@ -153,6 +157,7 @@ ESI_CONFIG: Dict[str, SpecConfig] = {
         "detector_type"   : "DTGS",             # Deuterated Tri-Glycine Sulfate (common)
         "beam_splitter"   : "KBr",              # optical material (affects range limit)
         "cuvette_type"    : "KBr",              # sample substrate / window material
+        "base_data_complexity": 6,              # moderate-high; functional groups overlap in mid-IR
     },
 
     # -----------------------------------------------------------------------
@@ -176,6 +181,7 @@ ESI_CONFIG: Dict[str, SpecConfig] = {
         "laser_wavelength_nm": 532.0,           # green laser (Nd:YAG 2nd harmonic)
         "grating_type"    : "1200 groove/mm",   # spectrograph grating (defines resolution)
         "detector_type"   : "CCD",              # sensitive, cooled detector
+        "base_data_complexity": 8,              # high; multiple Raman bands often present
     },
 }
 
@@ -303,6 +309,7 @@ PLOT_STYLE_CONFIG: Dict[str, PlotStyle] = {
             "line_color"        : "#1A3A6B",        # deep navy — journal-standard
             "line_width"        : 1.5,              # pt
             "line_style"        : "solid",          # "-"
+            "trailing_line_style": "--",            # dashed for secondary/correlated measurements
             "marker"            : None,             # suppressed for high-density data
             "marker_size"       : 0,
             "marker_edge_color" : None,
@@ -348,6 +355,7 @@ PLOT_STYLE_CONFIG: Dict[str, PlotStyle] = {
             "line_color"        : "#1E7A3A",        # forest green
             "line_width"        : 1.2,
             "line_style"        : "solid",
+            "trailing_line_style": ":",             # dotted for derivative traces
             "marker"            : "x",              # mark zero-crossings (peak positions)
             "marker_size"       : 5,
             "marker_edge_color" : "#0D4A22",
@@ -395,6 +403,7 @@ PLOT_STYLE_CONFIG: Dict[str, PlotStyle] = {
             "line_color"        : "#B84B00",        # burnt orange — echoes X-ray glow
             "line_width"        : 1.0,
             "line_style"        : "solid",
+            "trailing_line_style": "-.",            # dash-dot for secondary channels
             "marker"            : "|",              # vertical tick per channel (histogram)
             "marker_size"       : 3,
             "marker_edge_color" : "#7A3000",
@@ -442,6 +451,7 @@ PLOT_STYLE_CONFIG: Dict[str, PlotStyle] = {
             "line_color"        : "#00C8E0",        # bright cyan — Gatan DigitalMicrograph
             "line_width"        : 1.3,
             "line_style"        : "solid",
+            "trailing_line_style": "--",            # dashed for cross-correlated edges
             "marker"            : "o",              # circle at edge-onset positions
             "marker_size"       : 4,
             "marker_edge_color" : "#008FA0",
@@ -493,6 +503,7 @@ PLOT_STYLE_CONFIG: Dict[str, PlotStyle] = {
             "line_color"        : "#5C3D2E",        # warm brown — classic chart paper ink
             "line_width"        : 2.0,              # thick pen-like stroke
             "line_style"        : "solid",
+            "trailing_line_style": ":",             # dotted for cross-polarization
             "marker"            : None,
             "marker_size"       : 0,
             "marker_edge_color" : None,
@@ -541,6 +552,7 @@ PLOT_STYLE_CONFIG: Dict[str, PlotStyle] = {
             "line_color"        : "#0066CC",        # vivid blue — laser/optics theme
             "line_width"        : 1.4,
             "line_style"        : "solid",
+            "trailing_line_style": "--",            # dashed for orthogonal polarization
             "marker"            : None,
             "marker_size"       : 0,
             "marker_edge_color" : None,
