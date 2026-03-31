@@ -23,6 +23,7 @@ from PIL import Image
 import io
 import random
 import argparse
+from typing import Optional
 from esi_config import ESI_CONFIG, PLOT_STYLE_CONFIG
 from material_library import PEAK_LIBRARY
 
@@ -428,7 +429,7 @@ def create_dataframe(spectra: dict, technique: str, material: str = "Unknown") -
     return df
 
 
-def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complexity: int = 5, dpi: int = 100):
+def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complexity: int = 5, dpi: int = 100, seed: Optional[int] = None):
     """
     Apply visual degradation effects to rendered spectrum image.
     Severity of degradation is scaled by visual_complexity (1-10).
@@ -445,12 +446,19 @@ def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complex
         10 = maximum degradation
     dpi : int
         Original image DPI (used for scan line calculations)
+    seed : int, optional
+        Random seed for deterministic degradation (especially for paper grain)
     """
     if not low_res_config.get("enabled", True):
         return
     
     # Clamp visual_complexity to valid range
     visual_complexity = max(1, min(visual_complexity, 10))
+    
+    # Set seed for any random operations in degradation
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
     
     # Scale degradation parameters based on complexity
     # complexity 1 → scale 0.0 (no degradation)

@@ -9,11 +9,12 @@ A comprehensive Python pipeline for generating highly realistic synthetic spectr
 3. [Two-Axis Complexity System](#two-axis-complexity-system)
 4. [Installation & Setup](#installation--setup)
 5. [Usage](#usage)
-6. [File Structure](#file-structure)
-7. [Configuration & Material Library](#configuration--material-library)
-8. [Advanced Features](#advanced-features)
-9. [Technical Details](#technical-details)
-10. [Examples & Use Cases](#examples--use-cases)
+6. [Agent Interface](#agent-interface)
+7. [File Structure](#file-structure)
+8. [Configuration & Material Library](#configuration--material-library)
+9. [Advanced Features](#advanced-features)
+10. [Technical Details](#technical-details)
+11. [Examples & Use Cases](#examples--use-cases)
 
 ---
 
@@ -226,6 +227,85 @@ energy,intensity,line_id,technique,material
 
 ---
 
+## Agent Interface
+
+The pipeline supports direct AI agent interaction through the `SpectroscopyEnvironment` class in `agent_tools.py`. This enables programmatic sample generation with deterministic control and ground-truth metadata access.
+
+### Quick Start
+
+```python
+from agent_tools import SpectroscopyEnvironment
+
+# Create environment
+env = SpectroscopyEnvironment(output_dir='my_batch', verbose=True)
+
+# Generate a single spectrum with deterministic control
+result = env.generate_custom_sample(
+    technique='XPS',
+    material='Gold (Au)',
+    vis_complexity=5,      # Visual quality: 1 (pristine) to 10 (degraded)
+    data_complexity=6,     # Spectral complexity: 1 (simple) to 10 (complex)
+    seed=42                # Deterministic seed for reproducibility
+)
+
+# Result contains files, metadata, and ground truth
+print(result['sample_id'])      # 'xps_gold_(au)_42'
+print(result['csv_path'])       # 'my_batch/xps_gold_(au)_42.csv'
+print(result['png_path'])       # 'my_batch/xps_gold_(au)_42.png'
+print(result['spectra'])        # Ground truth peak data
+
+# Batch generation
+samples = [
+    {'technique': 'XPS', 'material': 'Silicon (Si)', 'vis_complexity': 2, 'data_complexity': 4, 'seed': 100},
+    {'technique': 'XPS', 'material': 'Gold (Au)', 'vis_complexity': 8, 'data_complexity': 8, 'seed': 101},
+]
+results = env.batch_generate(samples, verbose=True)
+
+# Save metadata manifest
+metadata_path = env.save_metadata()
+# Creates: my_batch/metadata.json with all sample information
+```
+
+### Key Features
+
+1. **Deterministic Control**: Same seed → identical output. Perfect for reproducible evaluation.
+2. **Ground Truth Access**: Every sample returns complete metadata including peak positions, widths, and intensities.
+3. **Decoupled Axes**: Data complexity and visual complexity are completely independent.
+4. **Metadata Manifest**: JSON file tracks all generated samples with their exact parameters and random seeds.
+5. **Batch Processing**: Generate multiple samples efficiently with metadata aggregation.
+
+### Return Value
+
+Each `generate_custom_sample()` call returns a dictionary with:
+
+```python
+{
+    'sample_id': str,              # Unique identifier
+    'technique': str,              # 'XPS', 'EDS', etc.
+    'material': str,               # Material name from library
+    'vis_complexity': int,         # 1-10
+    'data_complexity': int,        # 1-10
+    'seed': int,                   # Random seed used
+    'csv_path': str,               # Path to data file
+    'png_path': str,               # Path to rendered image
+    'num_lines': int,              # Primary spectral lines
+    'trailing_lines': list,        # Indices of secondary measurements
+    'data': pd.DataFrame,          # Full CSV data in memory
+    'spectra': dict,               # Ground truth decomposition
+}
+```
+
+### Complete Documentation
+
+See **[AGENT_INTERFACE.md](AGENT_INTERFACE.md)** for comprehensive API documentation, including:
+- Full method signatures and parameters
+- Metadata manifest structure
+- Example training and evaluation loops
+- Material and technique references
+- Troubleshooting guide
+
+---
+
 ## File Structure
 
 ```
@@ -233,13 +313,16 @@ my-TrainingDataGen/
 ├── esi_config.py                    # Core configuration (ESI_CONFIG, PLOT_STYLE_CONFIG)
 ├── material_library.py              # Material library (25+ materials with peaks)
 ├── spectrum_generator.py            # Main generation engine
-├── batch_generate.py                # User-facing batch interface
+├── batch_generate.py                # User-facing batch CLI interface
+├── agent_tools.py                   # Agent-ready programmatic interface (NEW)
 ├── README.md                        # This file
+├── AGENT_INTERFACE.md               # Complete agent API documentation (NEW)
 ├── TWO_AXIS_COMPLEXITY.md           # Detailed complexity system documentation
 ├── IMPLEMENTATION_NOTES.md          # Technical implementation details
 └── batch_vis5.0_data6.5_20240331_123456/  # Generated batch folder
     ├── spectrum_data_*.csv
     ├── spectrum_*.png
+    ├── metadata.json                # Manifest with all sample metadata (NEW)
     └── generated_csv_files.txt
 ```
 
