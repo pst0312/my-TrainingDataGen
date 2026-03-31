@@ -131,6 +131,152 @@ ESI_CONFIG: Dict[str, SpecConfig] = {
             "core_loss"  : ( 50.0, 2000.0),    # ionisation edges (element ID)
         },
     },
+
+    # -----------------------------------------------------------------------
+    # IR — Infrared Spectroscopy
+    # Absorption spectroscopy in mid-IR (400–4000 cm⁻¹); simulates historical
+    # analog chart-recorder output (smooth curves on mechanical paper).
+    # Background       : Baseline polynomial (often flat but may have slope).
+    # -----------------------------------------------------------------------
+    "IR": {
+        "x_axis"          : "Wavenumber",
+        "y_axis"          : "Transmittance",
+        "x_units"         : "cm⁻¹",
+        "y_units"         : "%T",               # percent transmittance
+        "x_range"         : (400.0, 4000.0),    # cm⁻¹; mid-IR standard region
+        "noise_profile"   : {
+            "gaussian_sigma"  : 2.0,            # cm⁻¹; instrument broadening
+            "poisson_lambda"  : 1200.0,         # detector photocurrent (low photon energy)
+        },
+        "background_type" : "Polynomial",       # baseline drift; often linear or quadratic
+        "peak_shape"      : "Lorentzian",       # IR absorption peaks (lifetime broadened)
+        "detector_type"   : "DTGS",             # Deuterated Tri-Glycine Sulfate (common)
+        "beam_splitter"   : "KBr",              # optical material (affects range limit)
+        "cuvette_type"    : "KBr",              # sample substrate / window material
+    },
+
+    # -----------------------------------------------------------------------
+    # Raman — Raman Spectroscopy
+    # Vibrational spectroscopy; measures Stokes shifts relative to excitation.
+    # Excitation often at 532 nm (green) or 633 nm (red) laser.
+    # Background       : Polynomial baseline + broad fluorescence.
+    # -----------------------------------------------------------------------
+    "Raman": {
+        "x_axis"          : "Raman Shift",
+        "y_axis"          : "Intensity",
+        "x_units"         : "cm⁻¹",
+        "y_units"         : "a.u.",             # arbitrary units (intensity in counts)
+        "x_range"         : (0.0, 3500.0),      # cm⁻¹; typical Stokes region
+        "noise_profile"   : {
+            "gaussian_sigma"  : 1.5,            # cm⁻¹; laser/spectrograph resolution
+            "poisson_lambda"  : 3000.0,         # high photon counts for Raman (small cross-section)
+        },
+        "background_type" : "Polynomial + Fluorescence",  # baseline + broad BG
+        "peak_shape"      : "Voigt",            # Raman peaks often Gaussian + lifetime broadening
+        "laser_wavelength_nm": 532.0,           # green laser (Nd:YAG 2nd harmonic)
+        "grating_type"    : "1200 groove/mm",   # spectrograph grating (defines resolution)
+        "detector_type"   : "CCD",              # sensitive, cooled detector
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Peak Library: Realistic Materials & Their Characteristic Peaks
+# ---------------------------------------------------------------------------
+# Each material defines peak positions, relative intensities, and natural widths
+# for different spectroscopy techniques. Used to replace random peak generation
+# with physics-based synthetic data.
+# ---------------------------------------------------------------------------
+PEAK_LIBRARY: Dict[str, Dict[str, Any]] = {
+
+    "Sodium Azide (NaN3)": {
+        "description": "Ionic azide compound; strong IR absorption in N=N stretches.",
+        "IR": {
+            "peaks": [
+                {"position": 2130.0, "intensity": 0.95, "fwhm": 15.0, "type": "symmetric_stretch"},  # asym N=N
+                {"position": 1280.0, "intensity": 0.45, "fwhm": 25.0, "type": "scissor"},
+                {"position": 640.0, "intensity": 0.35, "fwhm": 20.0, "type": "out_of_plane_bend"},
+            ]
+        },
+        "Raman": {
+            "peaks": [
+                {"position": 2130.0, "intensity": 0.80, "fwhm": 12.0, "type": "symmetric_stretch"},
+                {"position": 1140.0, "intensity": 0.30, "fwhm": 18.0, "type": "lattice"},
+            ]
+        },
+    },
+
+    "Gold (Au)": {
+        "description": "Noble metal; XPS signature from Au 4f doublet (7/2, 5/2).",
+        "XPS": {
+            "peaks": [
+                {"position": 84.0, "intensity": 0.67, "fwhm": 0.8, "type": "Au_4f_7/2"},
+                {"position": 87.8, "intensity": 0.33, "fwhm": 0.8, "type": "Au_4f_5/2"},
+            ]
+        },
+        "AES": {
+            "peaks": [
+                {"position": 239.0, "intensity": 0.50, "fwhm": 3.5, "type": "Au_L_M45M45"},
+                {"position": 325.0, "intensity": 0.30, "fwhm": 4.0, "type": "Au_M_NOP"},
+            ]
+        },
+    },
+
+    "Carbon (Graphite)": {
+        "description": "Sp² carbon network; distinct IR and Raman signatures.",
+        "IR": {
+            "peaks": [
+                {"position": 1580.0, "intensity": 0.85, "fwhm": 60.0, "type": "G_band_like"},
+                {"position": 1350.0, "intensity": 0.45, "fwhm": 80.0, "type": "D_band_like"},
+            ]
+        },
+        "Raman": {
+            "peaks": [
+                {"position": 1580.0, "intensity": 1.00, "fwhm": 30.0, "type": "G_band"},
+                {"position": 1350.0, "intensity": 0.35, "fwhm": 80.0, "type": "D_band"},
+                {"position": 2700.0, "intensity": 0.50, "fwhm": 50.0, "type": "2D_band"},
+            ]
+        },
+        "XPS": {
+            "peaks": [
+                {"position": 284.0, "intensity": 1.00, "fwhm": 1.0, "type": "C_1s_sp2"},
+                {"position": 285.0, "intensity": 0.20, "fwhm": 1.2, "type": "C_1s_sp3"},
+            ]
+        },
+    },
+
+    "Iron Oxide (Fe₂O₃)": {
+        "description": "Common mineral; XPS Fe 2p and O 1s; AES Fe L₃M₄₅M₄₅ Auger.",
+        "XPS": {
+            "peaks": [
+                {"position": 711.0, "intensity": 0.60, "fwhm": 1.8, "type": "Fe_2p_3/2"},
+                {"position": 724.5, "intensity": 0.30, "fwhm": 1.8, "type": "Fe_2p_1/2"},
+                {"position": 530.0, "intensity": 0.80, "fwhm": 1.2, "type": "O_1s"},
+            ]
+        },
+        "AES": {
+            "peaks": [
+                {"position": 415.0, "intensity": 0.70, "fwhm": 4.5, "type": "Fe_L_M45M45"},
+                {"position": 480.0, "intensity": 0.40, "fwhm": 5.0, "type": "Fe_M_NOP"},
+            ]
+        },
+    },
+
+    "Silicon (Si)": {
+        "description": "Semiconductor; Si 2p doublet in XPS; distinct EDS X-ray lines.",
+        "XPS": {
+            "peaks": [
+                {"position": 99.3, "intensity": 0.67, "fwhm": 0.85, "type": "Si_2p_1/2"},
+                {"position": 99.8, "intensity": 0.33, "fwhm": 0.85, "type": "Si_2p_3/2"},
+            ]
+        },
+        "EDS": {
+            "peaks": [
+                {"position": 1.740, "intensity": 1.00, "fwhm": 0.12, "type": "Si_K_alpha"},
+                {"position": 1.835, "intensity": 0.20, "fwhm": 0.12, "type": "Si_K_beta"},
+            ]
+        },
+    },
 }
 
 
@@ -335,6 +481,102 @@ PLOT_STYLE_CONFIG: Dict[str, PlotStyle] = {
             "logo_path"         : None,
             "logo_alpha"        : 0.10,
             "logo_position"     : "bottom-right",
+        },
+    },
+
+    # -----------------------------------------------------------------------
+    # IR — analog chart-recorder aesthetic; brown/sepia tones, smooth curves,
+    # simulates historical pen-plotted spectra on paper
+    # -----------------------------------------------------------------------
+    "IR": {
+        "visual_style": {
+            "line_color"        : "#5C3D2E",        # warm brown — classic chart paper ink
+            "line_width"        : 2.0,              # thick pen-like stroke
+            "line_style"        : "solid",
+            "marker"            : None,
+            "marker_size"       : 0,
+            "marker_edge_color" : None,
+            "fill_under_curve"  : True,             # shade transmission envelope
+            "fill_alpha"        : 0.08,
+            "fill_color"        : "#8B6F47",
+            "grid_visible"      : True,
+            "grid_axis"         : "both",
+            "grid_linestyle"    : "-",              # solid grid (printed grid lines)
+            "grid_alpha"        : 0.15,             # faint printed grid
+            "grid_color"        : "#CCCCCC",
+            "background_color"  : "#F5F0E5",        # aged paper color
+            "figure_facecolor"  : "#E8E2D5",        # outer paper background
+        },
+        "low_res": {
+            "enabled"           : True,
+            "downsample_factor" : 3,                # analog instrument resolution limit
+            "blur_sigma_px"     : 1.5,              # pen width / mechanical smoothing
+            "jpeg_quality"      : 40,               # grainy aged paper effect
+            "bit_depth"         : 8,
+            "add_scan_lines"    : False,
+            "target_dpi"        : 150,              # chart-recorder scanning speed
+            "paper_grain"       : True,             # add paper texture noise
+            "paper_grain_sigma" : 2.0,
+        },
+        "watermark": {
+            "enabled"           : False,            # historical data has no digital watermark
+            "text"              : "",
+            "font_size"         : 8,
+            "font_color"        : "#000000",
+            "font_alpha"        : 0.0,
+            "position"          : "center",
+            "rotation_deg"      : 0,
+            "logo_path"         : None,
+            "logo_alpha"        : 0.0,
+            "logo_position"     : "bottom-right",
+        },
+    },
+
+    # -----------------------------------------------------------------------
+    # Raman — modern laser spectrograph output; vivid colors, sharp lines,
+    # simulates software export from commercial Raman systems
+    # -----------------------------------------------------------------------
+    "Raman": {
+        "visual_style": {
+            "line_color"        : "#0066CC",        # vivid blue — laser/optics theme
+            "line_width"        : 1.4,
+            "line_style"        : "solid",
+            "marker"            : None,
+            "marker_size"       : 0,
+            "marker_edge_color" : None,
+            "fill_under_curve"  : True,
+            "fill_alpha"        : 0.15,
+            "fill_color"        : "#3399FF",
+            "grid_visible"      : True,
+            "grid_axis"         : "both",
+            "grid_linestyle"    : "--",
+            "grid_alpha"        : 0.30,
+            "grid_color"        : "#DDDDDD",
+            "background_color"  : "#FAFBFC",        # clean white
+            "figure_facecolor"  : "#F0F2F4",
+        },
+        "low_res": {
+            "enabled"           : True,
+            "downsample_factor" : 5,                # CCD pixel binning
+            "blur_sigma_px"     : 1.0,              # spectrograph slit width
+            "jpeg_quality"      : 50,               # digital acquisition noise
+            "bit_depth"         : 8,
+            "add_scan_lines"    : True,             # CCD row artifacts
+            "scan_line_spacing" : 3,
+            "scan_line_alpha"   : 0.05,
+            "target_dpi"        : 96,               # screen resolution
+        },
+        "watermark": {
+            "enabled"           : True,
+            "text"              : "RAMAN — SYNTHETIC / NOT FOR PUBLICATION",
+            "font_size"         : 9,
+            "font_color"        : "#0033AA",
+            "font_alpha"        : 0.22,
+            "position"          : "bottom-right",
+            "rotation_deg"      : 0,
+            "logo_path"         : None,
+            "logo_alpha"        : 0.12,
+            "logo_position"     : "top-left",
         },
     },
 }
