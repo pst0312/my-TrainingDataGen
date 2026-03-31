@@ -23,7 +23,8 @@ from PIL import Image
 import io
 import random
 import argparse
-from SpectDict import ESI_CONFIG, PLOT_STYLE_CONFIG, PEAK_LIBRARY
+from esi_config import ESI_CONFIG, PLOT_STYLE_CONFIG
+from material_library import PEAK_LIBRARY
 
 
 
@@ -393,7 +394,7 @@ def generate_synthetic_data(
     return spectra
 
 
-def create_dataframe(spectra: dict, technique: str) -> pd.DataFrame:
+def create_dataframe(spectra: dict, technique: str, material: str = "Unknown") -> pd.DataFrame:
     """
     Create a pandas DataFrame from multiple spectrum lines.
     
@@ -403,11 +404,13 @@ def create_dataframe(spectra: dict, technique: str) -> pd.DataFrame:
         Dictionary mapping line_id to (x, y) tuples
     technique : str
         Spectroscopy technique name
+    material : str
+        Material name from library (default: "Unknown")
         
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: energy, intensity, line_id, technique
+        DataFrame with columns: energy, intensity, line_id, technique, material
     """
     records = []
     
@@ -418,6 +421,7 @@ def create_dataframe(spectra: dict, technique: str) -> pd.DataFrame:
                 "intensity": intensity,
                 "line_id": line_id,
                 "technique": technique,
+                "material": material,
             })
     
     df = pd.DataFrame(records)
@@ -770,7 +774,8 @@ if __name__ == "__main__":
     )
     
     # Create DataFrame
-    df = create_dataframe(spectra, technique)
+    material_name = material if material else "Unknown"
+    df = create_dataframe(spectra, technique, material=material_name)
     print(f"\nDataFrame created:")
     print(f"  Shape: {df.shape}")
     print(f"  Columns: {list(df.columns)}")

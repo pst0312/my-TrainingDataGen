@@ -1,5 +1,20 @@
+"""
+batch_generate.py
+=================
+User-facing batch generation interface for synthetic spectroscopy data.
+
+Features:
+  - Interactive prompts for visual and data complexity ranges
+  - Automatic batch folder creation with timestamp
+  - Routes all outputs (PNG, CSV) to organized batch directory
+  - Validates input and provides defaults
+"""
+
 import subprocess
 import sys
+import os
+import glob
+from datetime import datetime
 
 
 def parse_complexity_range(user_input, default_min=1, default_max=10):
@@ -55,10 +70,25 @@ def main():
             min_data, max_data = data_range
             break
     
+    # Calculate averages
+    avg_vis = (min_vis + max_vis) / 2.0
+    avg_data = (min_data + max_data) / 2.0
+    
+    # Create batch folder with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    batch_folder = f"batch_vis{avg_vis:.1f}_data{avg_data:.1f}_{timestamp}"
+    
+    try:
+        os.makedirs(batch_folder, exist_ok=True)
+    except OSError as e:
+        print(f"Error creating batch folder '{batch_folder}': {e}")
+        sys.exit(1)
+    
     print(f"\nConfiguration Summary:")
-    print(f"  Visual Complexity: {min_vis}-{max_vis}")
-    print(f"  Data Complexity: {min_data}-{max_data}")
+    print(f"  Visual Complexity: {min_vis}-{max_vis} (avg: {avg_vis:.1f})")
+    print(f"  Data Complexity: {min_data}-{max_data} (avg: {avg_data:.1f})")
     print(f"  Spectra to generate: {n}")
+    print(f"  Output folder: {batch_folder}/")
     
     csv_files = []
     for i in range(1, n + 1):
@@ -76,24 +106,35 @@ def main():
             ]
             subprocess.run(cmd, check=True)
             
-            # Try to find the generated CSV file (pattern: spectrum_data_*_multiline_{i}.csv)
-            import glob
-            matches = glob.glob(f"spectrum_data_*_multiline_{i}.csv")
-            if matches:
-                csv_files.append(matches[0])
+            # Move generated files to batch folder
+            # Pattern: spectrum_*_multiline_{i}.*
+            png_matches = glob.glob(f"spectrum_*_multiline_{i}.png")
+            csv_matches = glob.glob(f"spectrum_data_*_multiline_{i}.csv")
+            
+            for file in png_matches + csv_matches:
+                try:
+                    new_path = os.path.join(batch_folder, file)
+                    os.rename(file, new_path)
+                    if file.endswith('.csv'):
+                        csv_files.append(new_path)
+                except OSError as e:
+                    print(f"Warning: Could not move {file}: {e}")
+                    
         except subprocess.CalledProcessError as e:
             print(f"Error running spectrum_generator.py: {e}")
             break
     
     # Save the list of CSV files for validation
-    with open("generated_csv_files.txt", "w") as f:
+    csv_list_path = os.path.join(batch_folder, "generated_csv_files.txt")
+    with open(csv_list_path, "w") as f:
         for csvf in csv_files:
             f.write(csvf + "\n")
     
     print(f"\n{'='*80}")
     print(f"Generation complete!")
     print(f"CSV files generated: {len(csv_files)}/{n}")
-    print(f"Files saved to: generated_csv_files.txt")
+    print(f"All outputs saved to: {batch_folder}/")
+    print(f"CSV file list: {csv_list_path}")
     print(f"{'='*80}")
 
 
