@@ -154,6 +154,32 @@ def polynomial_baseline(x, degree=1, coeffs=None):
     return np.polyval(coeffs, x)
 
 
+def transmittance_baseline(x, baseline_level=1.0, slope=0.01):
+    """
+    Transmittance baseline for absorbance/transmittance spectroscopy (FTIR, UV-Vis).
+    Starts at a high level (typically 0.95-1.0 or 95-100%) with optional drift.
+    
+    Parameters
+    ----------
+    x : ndarray
+        Axis values (wavenumber or wavelength)
+    baseline_level : float
+        High baseline value (1.0 for 100% transmittance, 0.95 for 95%)
+    slope : float
+        Linear drift per unit x (simulates instrument baseline drift)
+    
+    Returns
+    -------
+    ndarray
+        Transmittance baseline (starts high, absorption dips downward)
+    """
+    # Normalize x to 0-1 range for slope calculation
+    x_norm = (x - np.min(x)) / (np.max(x) - np.min(x)) if np.max(x) > np.min(x) else 0
+    drift = slope * x_norm * baseline_level * 0.05  # small drift
+    baseline = baseline_level - drift + np.random.normal(0, baseline_level * 0.01, len(x))
+    return np.maximum(baseline, baseline_level * 0.85)  # keep above 85% of baseline
+
+
 # ============================================================================
 # MAIN SPECTRUM GENERATION
 # ============================================================================
@@ -224,8 +250,17 @@ def generate_synthetic_data(
     
     spectra = {}
     
+    # Check if this is transmittance mode (FTIR, UV-Vis)
+    is_transmittance = config.get("background_type") == "Transmittance"
+    baseline_level = config.get("baseline_level", 1.0)
+    
     for line_id in range(1, n_lines + 1):
-        y = np.zeros_like(x)
+        if is_transmittance:
+            # For transmittance mode, start at high baseline
+            y = np.full_like(x, baseline_level)
+        else:
+            # For emission/absorption modes, start from zero
+            y = np.zeros_like(x)
         
         # ============================================================
         # PEAK GENERATION (Physics-based or from library)
@@ -238,39 +273,71 @@ def generate_synthetic_data(
             # Add slight variation in intensity and width (sample variation)
             for peak_info in peak_data:
                 pos = peak_info["position"]
-                intensity = peak_info["intensity"] * np.random.uniform(0.85, 1.15)
                 fwhm = peak_info["fwhm"] * np.random.uniform(0.9, 1.1)
+                
+                # For transmittance mode, invert peak logic
+                if is_transmittance:
+                    # Convert library intensity to transmittance dip depth (20-60% absorption)
+                    # Library intensity is relative; for FTIR we want strong dips
+                    intensity = (peak_info["intensity"] / 100.0) * np.random.uniform(0.85, 1.15) * baseline_level
+                    # Scale to reasonable dip depth (not too shallow)
+                    intensity = np.clip(intensity, baseline_level * 0.15, baseline_level * 0.5)
+                else:
+                    # Normal mode: peaks are upward
+                    intensity = peak_info["intensity"] * np.random.uniform(0.85, 1.15)
                 
                 # Use line shape from config
                 line_shape = config.get("peak_shape", "Gaussian")
+                peak = None
                 
                 if line_shape == "Gaussian":
-                    y += gaussian(x, pos, fwhm, intensity)
+                    peak = gaussian(x, pos, fwhm, intensity)
                 elif line_shape == "Lorentzian":
-                    y += lorentzian(x, pos, fwhm, intensity)
+                    peak = lorentzian(x, pos, fwhm, intensity)
                 elif line_shape == "Voigt":
                     # Voigt: blend Gaussian (50%) and Lorentzian (50%)
                     fwhm_g = fwhm * 0.7
                     fwhm_l = fwhm * 0.3
-                    y += voigt(x, pos, fwhm_g, fwhm_l, intensity)
+                    peak = voigt(x, pos, fwhm_g, fwhm_l, intensity)
                 else:
-                    y += gaussian(x, pos, fwhm, intensity)  # default
+                    peak = gaussian(x, pos, fwhm, intensity)  # default
+                
+                if is_transmittance:
+                    # Subtract peaks (dips downward from baseline)
+                    y -= peak
+                else:
+                    # Add peaks (peaks upward from zero)
+                    y += peak
         else:
             # Fallback: random peak generation (for techniques without library)
             num_peaks = np.random.randint(2, 6)
             peak_positions = np.random.uniform(x_lo, x_hi, num_peaks)
-            peak_heights = np.random.uniform(10, 100, num_peaks)
-            peak_widths = np.random.uniform(5, 50, num_peaks)
+            
+            if is_transmittance:
+                # For transmittance, generate deeper dips
+                # Narrower FWHM for transmittance (sharp molecular transitions)
+                fwhm_range = config.get("fwhm_range", (2.0, 8.0))
+                peak_widths = np.random.uniform(fwhm_range[0], fwhm_range[1], num_peaks)
+                # Dip depth: 20-60% of baseline (strong absorption)
+                peak_depths = np.random.uniform(baseline_level * 0.2, baseline_level * 0.6, num_peaks)
+            else:
+                peak_widths = np.random.uniform(5, 50, num_peaks)
+                peak_depths = np.random.uniform(10, 100, num_peaks)
             
             line_shape = config.get("peak_shape", "Gaussian")
             
-            for pos, height, width in zip(peak_positions, peak_heights, peak_widths):
+            for pos, height, width in zip(peak_positions, peak_widths, peak_depths):
                 if line_shape == "Lorentzian":
-                    y += lorentzian(x, pos, width, height)
+                    peak = lorentzian(x, pos, width, height)
                 elif line_shape == "Voigt":
-                    y += voigt(x, pos, width * 0.7, width * 0.3, height)
+                    peak = voigt(x, pos, width * 0.7, width * 0.3, height)
                 else:
-                    y += gaussian(x, pos, width, height)
+                    peak = gaussian(x, pos, width, height)
+                
+                if is_transmittance:
+                    y -= peak
+                else:
+                    y += peak
         
         # ============================================================
         # BACKGROUND GENERATION (Physics-based)
@@ -278,7 +345,12 @@ def generate_synthetic_data(
         
         bg_type = config.get("background_type", "Linear")
         
-        if bg_type == "Shirley":
+        if bg_type == "Transmittance":
+            # FTIR / UV-Vis transmittance baseline
+            baseline = transmittance_baseline(x, baseline_level=baseline_level, slope=0.01)
+            # Replace the high baseline we started with
+            y = baseline + (y - baseline_level)
+        elif bg_type == "Shirley":
             # Create temporary y with peaks for Shirley estimation
             temp_y = np.copy(y) + np.random.normal(0, 0.5, n_points)
             bg = shirley_background(x, temp_y, n_iter=5)
@@ -299,22 +371,27 @@ def generate_synthetic_data(
             y += 50 * np.exp(-0.001 * (x - x_lo))
         else:
             # Linear baseline (default)
-            y += np.linspace(5, 20, n_points)
+            if not is_transmittance:
+                y += np.linspace(5, 20, n_points)
         
         # ============================================================
         # NOISE ADDITION (Realistic detector & photon noise)
         # ============================================================
         
-        # Gaussian detector noise (readout noise, amplifier noise)
-        y += np.random.normal(0, gaussian_sigma * np.max(y) * 0.01, n_points)
-        
-        # Poisson shot noise (photon counting statistics)
-        # Scale Poisson contribution based on technique sensitivity
-        y = np.maximum(y, 0)  # ensure non-negative for Poisson
-        y += np.random.poisson(poisson_lambda / 10000, n_points) / 100
+        if is_transmittance:
+            # For transmittance, noise is relative to baseline (1.0)
+            y += np.random.normal(0, gaussian_sigma * baseline_level * 0.005, n_points)
+            y = np.clip(y, 0, baseline_level * 1.1)  # keep in reasonable range
+        else:
+            # Normal noise handling
+            y += np.random.normal(0, gaussian_sigma * np.max(y) * 0.01, n_points)
+            # Poisson shot noise (photon counting statistics)
+            y = np.maximum(y, 0)  # ensure non-negative for Poisson
+            y += np.random.poisson(poisson_lambda / 10000, n_points) / 100
         
         # Add slight vertical offset between lines (for multi-line display)
-        y += (line_id - 1) * np.random.uniform(5, 20)
+        if not is_transmittance:
+            y += (line_id - 1) * np.random.uniform(5, 20)
         
         spectra[line_id] = (x, y)
         
@@ -329,44 +406,72 @@ def generate_synthetic_data(
         trailing_probability = min(0.7, data_complexity / 10.0)  # up to 70% chance
         if data_complexity >= 6 and np.random.random() < trailing_probability:
             # Create trailing line with same peaks but reduced intensity
-            y_trailing = np.zeros_like(x)
+            if is_transmittance:
+                y_trailing = np.full_like(x, baseline_level)
+            else:
+                y_trailing = np.zeros_like(x)
+            
             trailing_intensity_scale = np.random.uniform(0.3, 0.7)
             
             if material and material in PEAK_LIBRARY:
                 peak_data = PEAK_LIBRARY[material].get(technique, {}).get("peaks", [])
                 for peak_info in peak_data:
                     pos = peak_info["position"]
-                    intensity = peak_info["intensity"] * trailing_intensity_scale * np.random.uniform(0.85, 1.15)
                     fwhm = peak_info["fwhm"] * np.random.uniform(0.9, 1.1)
+                    
+                    if is_transmittance:
+                        intensity = peak_info["intensity"] * trailing_intensity_scale * np.random.uniform(0.85, 1.15) * 0.5
+                        intensity = np.minimum(intensity, baseline_level * 0.4)
+                    else:
+                        intensity = peak_info["intensity"] * trailing_intensity_scale * np.random.uniform(0.85, 1.15)
                     
                     line_shape = config.get("peak_shape", "Gaussian")
                     if line_shape == "Gaussian":
-                        y_trailing += gaussian(x, pos, fwhm, intensity)
+                        peak = gaussian(x, pos, fwhm, intensity)
                     elif line_shape == "Lorentzian":
-                        y_trailing += lorentzian(x, pos, fwhm, intensity)
+                        peak = lorentzian(x, pos, fwhm, intensity)
                     elif line_shape == "Voigt":
-                        y_trailing += voigt(x, pos, fwhm * 0.7, fwhm * 0.3, intensity)
+                        peak = voigt(x, pos, fwhm * 0.7, fwhm * 0.3, intensity)
                     else:
-                        y_trailing += gaussian(x, pos, fwhm, intensity)
+                        peak = gaussian(x, pos, fwhm, intensity)
+                    
+                    if is_transmittance:
+                        y_trailing -= peak
+                    else:
+                        y_trailing += peak
             else:
                 # Fallback: scale primary line peaks
-                # Re-synthesize with same positions but reduced intensity
                 num_peaks = np.random.randint(2, 6)
                 peak_positions = np.random.uniform(x_lo, x_hi, num_peaks)
-                peak_widths = np.random.uniform(5, 50, num_peaks)
+                
+                if is_transmittance:
+                    fwhm_range = config.get("fwhm_range", (2.0, 8.0))
+                    peak_widths = np.random.uniform(fwhm_range[0], fwhm_range[1], num_peaks)
+                    peak_depths = np.random.uniform(baseline_level * 0.05, baseline_level * 0.25, num_peaks)
+                else:
+                    peak_widths = np.random.uniform(5, 50, num_peaks)
+                    peak_depths = np.random.uniform(10, 100, num_peaks) * trailing_intensity_scale
+                
                 line_shape = config.get("peak_shape", "Gaussian")
-                for pos, width in zip(peak_positions, peak_widths):
-                    height = 100 * trailing_intensity_scale
+                for pos, width, height in zip(peak_positions, peak_widths, peak_depths):
                     if line_shape == "Lorentzian":
-                        y_trailing += lorentzian(x, pos, width, height)
+                        peak = lorentzian(x, pos, width, height)
                     elif line_shape == "Voigt":
-                        y_trailing += voigt(x, pos, width * 0.7, width * 0.3, height)
+                        peak = voigt(x, pos, width * 0.7, width * 0.3, height)
                     else:
-                        y_trailing += gaussian(x, pos, width, height)
+                        peak = gaussian(x, pos, width, height)
+                    
+                    if is_transmittance:
+                        y_trailing -= peak
+                    else:
+                        y_trailing += peak
             
             # Add same background and noise
             bg_type = config.get("background_type", "Linear")
-            if bg_type == "Shirley":
+            if bg_type == "Transmittance":
+                baseline = transmittance_baseline(x, baseline_level=baseline_level * 0.9, slope=0.005)
+                y_trailing = baseline + (y_trailing - baseline_level)
+            elif bg_type == "Shirley":
                 temp_y_trailing = np.copy(y_trailing) + np.random.normal(0, 0.5, n_points)
                 bg = shirley_background(x, temp_y_trailing, n_iter=5)
                 y_trailing += bg * 0.5  # scale background for trailing line
@@ -382,12 +487,17 @@ def generate_synthetic_data(
             elif "Power" in bg_type:
                 y_trailing += 50 * np.exp(-0.001 * (x - x_lo)) * 0.5
             else:
-                y_trailing += np.linspace(5, 20, n_points) * 0.5
+                if not is_transmittance:
+                    y_trailing += np.linspace(5, 20, n_points) * 0.5
             
             # Add noise
-            y_trailing += np.random.normal(0, gaussian_sigma * np.max(y_trailing) * 0.01, n_points)
-            y_trailing = np.maximum(y_trailing, 0)
-            y_trailing += np.random.poisson(poisson_lambda / 20000, n_points) / 100
+            if is_transmittance:
+                y_trailing += np.random.normal(0, gaussian_sigma * baseline_level * 0.003, n_points)
+                y_trailing = np.clip(y_trailing, 0, baseline_level * 1.1)
+            else:
+                y_trailing += np.random.normal(0, gaussian_sigma * np.max(y_trailing) * 0.01, n_points)
+                y_trailing = np.maximum(y_trailing, 0)
+                y_trailing += np.random.poisson(poisson_lambda / 20000, n_points) / 100
             
             # Store trailing line with special key
             spectra["{0}_trailing".format(line_id)] = (x, y_trailing)
@@ -604,6 +714,13 @@ def plot_spectrum(df: pd.DataFrame, spectra: dict, technique: str, config: dict,
     x_units = config.get("x_units", "eV")
     y_label = config.get("y_axis", "Intensity")
     y_units = config.get("y_units", "a.u.")
+    
+    # Special handling for transmittance mode (FTIR, UV-Vis)
+    is_transmittance = config.get("background_type") == "Transmittance"
+    if is_transmittance:
+        y_label = config.get("y_axis", "Transmittance")
+        y_units = config.get("y_units", "%T")
+    
     ax.set_xlabel(f"{config.get('x_axis', 'Energy')} ({x_units})", fontsize=12)
     ax.set_ylabel(f"{y_label} ({y_units})", fontsize=12)
     ax.set_title(
@@ -611,6 +728,15 @@ def plot_spectrum(df: pd.DataFrame, spectra: dict, technique: str, config: dict,
         fontsize=14,
         fontweight="bold",
     )
+    
+    # Set Y-axis limits for transmittance mode
+    if is_transmittance:
+        baseline_level = config.get("baseline_level", 1.0)
+        # For transmittance, set limits to show dips nicely (0 to 110% of baseline)
+        if y_units == "%T":
+            ax.set_ylim(0, baseline_level * 100 * 1.1)
+        else:
+            ax.set_ylim(0, baseline_level * 1.1)
     
     # Configure grid
     if vs.get("grid_visible", True):
