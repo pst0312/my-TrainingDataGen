@@ -71,6 +71,7 @@ class SpectroscopyEnvironment:
         material: Optional[str] = None,
         vis_complexity: int = 5,
         data_complexity: int = 5,
+        blur: bool = True,
         seed: Optional[int] = None,
         n_points: int = 2048,
     ) -> Dict[str, Any]:
@@ -90,6 +91,9 @@ class SpectroscopyEnvironment:
             Visual complexity (1-10). Controls image degradation severity.
         data_complexity : int
             Data complexity (1-10). Controls number of peaks and trailing lines.
+        blur : bool
+            Whether graphs may be blurred during visual degradation.
+            If False, plots are saved with pristine visibility.
         seed : int, optional
             Random seed for determinism. If None, uses current time.
             Same seed guarantees identical sample regeneration.
@@ -162,8 +166,7 @@ class SpectroscopyEnvironment:
             print(f"  Material: {material}")
             print(f"  Data Complexity: {data_complexity}/10")
             print(f"  Visual Complexity: {vis_complexity}/10")
-            print(f"  Seed: {seed}")
-        
+        print(f"  Blur Enabled: {blur}")
         # Get configuration
         config = ESI_CONFIG[technique]
         style = PLOT_STYLE_CONFIG[technique]
@@ -215,7 +218,8 @@ class SpectroscopyEnvironment:
                 str(png_path),
                 style.get("low_res", {}),
                 visual_complexity=vis_complexity,
-                dpi=100
+                dpi=100,
+                blur=blur,
             )
         
         plt.close(fig)
@@ -231,6 +235,7 @@ class SpectroscopyEnvironment:
             "num_lines": int(num_lines),
             "trailing_lines": trailing_lines,
             "num_trailing_lines": len(trailing_lines),
+            "blur_enabled": blur,
             "seed": int(seed),
             "csv_path": str(csv_path),
             "png_path": str(png_path),
@@ -253,6 +258,7 @@ class SpectroscopyEnvironment:
             "material": material_name,
             "vis_complexity": vis_complexity,
             "data_complexity": data_complexity,
+            "blur_enabled": blur,
             "base_data_complexity": base_data_complexity,
             "seed": int(seed),
             "trailing_lines": trailing_lines,
@@ -280,6 +286,7 @@ class SpectroscopyEnvironment:
             - 'material' (str, optional)
             - 'vis_complexity' (int, optional, default 5)
             - 'data_complexity' (int, optional, default 5)
+            - 'blur' (bool, optional, default True)
             - 'seed' (int, optional)
         verbose : bool
             Print progress for each sample.
@@ -309,6 +316,7 @@ class SpectroscopyEnvironment:
                 material=spec.get('material'),
                 vis_complexity=spec.get('vis_complexity', 5),
                 data_complexity=spec.get('data_complexity', 5),
+                blur=spec.get('blur', True),
                 seed=spec.get('seed'),
                 n_points=spec.get('n_points', 2048),
             )

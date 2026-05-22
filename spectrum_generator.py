@@ -24,8 +24,7 @@ import io
 import random
 import argparse
 from typing import Optional
-from esi_config import ESI_CONFIG, PLOT_STYLE_CONFIG
-from material_library import PEAK_LIBRARY
+from SpectDict import ESI_CONFIG, PLOT_STYLE_CONFIG, PEAK_LIBRARY
 
 
 
@@ -67,11 +66,47 @@ def voigt(x, center, fwhm_g, fwhm_l, intensity=1.0):
     return intensity * np.real(special.wofz(z)) / (sigma * np.sqrt(2 * np.pi))
 
 
+def aes_derivative_profile(x, center, fwhm, intensity=1.0, asymmetry=0.2):
+    """Generate an AES-like derivative peak: rapid dip followed by sharp spike.
+
+    This implementation uses the analytical derivative of a Gaussian and
+    applies a mild asymmetry factor to skew the response so the dip and
+    spike are not perfectly symmetric.
+    """
+    # base Gaussian
+    sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+    gauss = np.exp(-((x - center) ** 2) / (2 * sigma ** 2))
+    # analytical derivative d/dx of Gaussian ~ (x-center)*gauss
+    deriv = -(x - center) * gauss / (sigma ** 2)
+    # apply asymmetry by tilting the x-axis weighting
+    skew = 1.0 + asymmetry * (x - center) / (fwhm + 1e-12)
+    profile = intensity * deriv * skew
+    # normalize to requested amplitude (peak-to-peak ~ intensity*2)
+    if np.max(np.abs(profile)) > 0:
+        profile = profile / np.max(np.abs(profile)) * intensity
+    return profile
+
+
+def zlp_profile(x, center=0.0, amplitude=1.0, fwhm=0.5):
+    """Zero-loss peak for EELS: very narrow, very intense near 0 eV."""
+    return gaussian(x, center, fwhm, amplitude)
+
+
+def edge_profile(x, threshold, amplitude=1.0, decay_scale=50.0):
+    """Simple edge: zero below threshold, sharp rise then gradual decay."""
+    # smooth step at threshold followed by exponential/power-law decay
+    shifted = x - threshold
+    edge = np.zeros_like(x)
+    mask = shifted >= 0
+    edge[mask] = amplitude * (1.0 - np.exp(-shifted[mask] / (decay_scale + 1e-12))) * np.exp(-shifted[mask] / (decay_scale * 5.0 + 1e-12))
+    return edge
+
+
 # ============================================================================
 # BACKGROUND FUNCTIONS (Physics-Based Models)
 # ============================================================================
 
-def shirley_background(x, y, n_iter=10):
+def shirley_background(x, y, n_iter=10, axis_reversed=False):
     """
     Iterative Shirley background subtraction for XPS/ESCA data.
     Approximates the accumulated intensity of inelastic scattering.
@@ -90,22 +125,33 @@ def shirley_background(x, y, n_iter=10):
     ndarray
         Background estimate (same shape as y)
     """
-    bg = np.copy(y)
-    y_min = np.min(y)
-    x_min, x_max = x[0], x[-1]
-    
+    # If axis_reversed (e.g., XPS binding energy plotted high→low),
+    # compute background on the reversed axis so the Shirley step behaves
+    # correctly (it should step up when moving right-to-left for XPS).
+    if axis_reversed:
+        x_work = x[::-1]
+        y_work = y[::-1]
+    else:
+        x_work = x
+        y_work = y
+
+    bg = np.copy(y_work)
+    y_min = np.min(y_work)
+    x_min, x_max = x_work[0], x_work[-1]
+
     for _ in range(n_iter):
         integral = np.cumsum(bg)
-        # Normalize integral to span [0, 1] across energy range
         integral = (integral - integral[0]) / (integral[-1] - integral[0] + 1e-12)
-        bg_new = y_min + (np.max(y) - y_min) * integral
-        # Smooth update to avoid oscillation
+        bg_new = y_min + (np.max(y_work) - y_min) * integral
         bg = 0.5 * bg + 0.5 * bg_new
-    
+
+    # If we computed on reversed axis, flip back
+    if axis_reversed:
+        return bg[::-1]
     return bg
 
 
-def bremsstrahlung_background(x, x_min, intensity=1000.0, k=1.5):
+def bremsstrahlung_background(x, x_min, intensity=1000.0, k=1.7, E0=20.0):
     """
     Bremsstrahlung (Kramers' law) background for EDS.
     Approximates continuum X-ray generation: I(E) ∝ intensity / E^k
@@ -126,8 +172,17 @@ def bremsstrahlung_background(x, x_min, intensity=1000.0, k=1.5):
     ndarray
         Bremsstrahlung background
     """
-    x_clipped = np.maximum(x, x_min + 0.01)  # avoid singularity
-    return intensity / (x_clipped ** k)
+    # Convert to numpy array and ensure energies are positive
+    x_keV = np.maximum(x, 1e-6)
+    # Kramers-like shape: (E0 - E)/E * (1/E^k) with a soft peak and cutoff
+    prefactor = (np.maximum(E0 - x_keV, 0.0) / (E0 + 1e-12))
+    # Suppress the unphysical low-energy divergence and produce a peak around 1-2 keV
+    low_energy_rise = x_keV ** 2.65 / (x_keV + 0.5)
+    raw = prefactor * low_energy_rise / (x_keV ** k)
+    # normalize raw shape to have max == 1 then scale
+    if np.max(raw) > 0:
+        raw = raw / np.max(raw)
+    return intensity * raw
 
 
 def polynomial_baseline(x, degree=1, coeffs=None):
@@ -152,6 +207,12 @@ def polynomial_baseline(x, degree=1, coeffs=None):
         # Random coefficients for natural variation
         coeffs = np.random.uniform(-0.5, 0.5, degree + 1)
     return np.polyval(coeffs, x)
+
+
+def power_law_background(x, scale=1.0, exponent=-1.5):
+    """Power-law baseline used for AES/EELS backgrounds."""
+    x_safe = np.maximum(x, 1e-6)
+    return scale * np.power(x_safe, exponent)
 
 
 def transmittance_baseline(x, baseline_level=1.0, slope=0.01):
@@ -230,6 +291,10 @@ def generate_synthetic_data(
     # Generate x-axis
     x_lo, x_hi = config["x_range"]
     x = np.linspace(x_lo, x_hi, n_points)
+    if technique == "EELS" and x_lo < 0.0 < x_hi and not np.any(np.isclose(x, 0.0)):
+        x = np.sort(np.concatenate([x, [0.0]]))
+        n_points = len(x)
+    axis_reversed = config.get("axis_reversed", False)
     
     # Get noise parameters
     noise = config.get("noise_profile", {})
@@ -255,6 +320,9 @@ def generate_synthetic_data(
     baseline_level = config.get("baseline_level", 1.0)
     
     for line_id in range(1, n_lines + 1):
+        # For AES we will build a raw signal and then take the first derivative
+        if technique == "AES":
+            y_raw = np.zeros_like(x)
         if is_transmittance:
             # For transmittance mode, start at high baseline
             y = np.full_like(x, baseline_level)
@@ -286,28 +354,39 @@ def generate_synthetic_data(
                     # Normal mode: peaks are upward
                     intensity = peak_info["intensity"] * np.random.uniform(0.85, 1.15)
                 
-                # Use line shape from config
-                line_shape = config.get("peak_shape", "Gaussian")
-                peak = None
-                
-                if line_shape == "Gaussian":
-                    peak = gaussian(x, pos, fwhm, intensity)
-                elif line_shape == "Lorentzian":
-                    peak = lorentzian(x, pos, fwhm, intensity)
-                elif line_shape == "Voigt":
-                    # Voigt: blend Gaussian (50%) and Lorentzian (50%)
-                    fwhm_g = fwhm * 0.7
-                    fwhm_l = fwhm * 0.3
-                    peak = voigt(x, pos, fwhm_g, fwhm_l, intensity)
-                else:
-                    peak = gaussian(x, pos, fwhm, intensity)  # default
-                
-                if is_transmittance:
-                    # Subtract peaks (dips downward from baseline)
-                    y -= peak
-                else:
-                    # Add peaks (peaks upward from zero)
+                # Choose shape based on technique and peak metadata
+                line_shape = peak_info.get("shape", config.get("peak_shape", "Gaussian")).lower()
+
+                if technique == "AES" or line_shape in ("derivative", "asymmetric_derivative"):
+                    # For AES and derivative-specified peaks, accumulate into raw signal
+                    peak = aes_derivative_profile(x, pos, fwhm, intensity)
+                    y_raw += peak
+                elif technique == "EELS" and line_shape == "zlp":
+                    # Add ZLP explicitly (very narrow, intense)
+                    peak = zlp_profile(x, center=pos, amplitude=intensity * 10.0, fwhm=max(0.3, fwhm * 0.2))
                     y += peak
+                elif technique == "EELS" and line_shape == "edge":
+                    # edge_profile expects threshold
+                    peak = edge_profile(x, threshold=peak_info.get("edge_threshold", pos), amplitude=intensity, decay_scale=max(10.0, fwhm))
+                    y += peak
+                else:
+                    if line_shape == "gaussian":
+                        peak = gaussian(x, pos, fwhm, intensity)
+                    elif line_shape == "lorentzian":
+                        peak = lorentzian(x, pos, fwhm, intensity)
+                    elif line_shape == "voigt":
+                        fwhm_g = fwhm * 0.7
+                        fwhm_l = fwhm * 0.3
+                        peak = voigt(x, pos, fwhm_g, fwhm_l, intensity)
+                    elif line_shape == "edge":
+                        peak = edge_profile(x, threshold=peak_info.get("edge_threshold", pos), amplitude=intensity, decay_scale=max(10.0, fwhm))
+                    else:
+                        peak = gaussian(x, pos, fwhm, intensity)
+
+                    if is_transmittance:
+                        y -= peak
+                    else:
+                        y += peak
         else:
             # Fallback: random peak generation (for techniques without library)
             num_peaks = np.random.randint(2, 6)
@@ -327,18 +406,26 @@ def generate_synthetic_data(
             line_shape = config.get("peak_shape", "Gaussian")
             
             for pos, height, width in zip(peak_positions, peak_widths, peak_depths):
-                if line_shape == "Lorentzian":
+                if line_shape.lower() == "lorentzian":
                     peak = lorentzian(x, pos, width, height)
-                elif line_shape == "Voigt":
+                elif line_shape.lower() == "voigt":
                     peak = voigt(x, pos, width * 0.7, width * 0.3, height)
                 else:
                     peak = gaussian(x, pos, width, height)
-                
+
                 if is_transmittance:
                     y -= peak
                 else:
                     y += peak
         
+        # ============================================================
+        # Add EELS zero-loss peak in every EELS spectrum
+        # ============================================================
+        if technique == "EELS":
+            zlp_fwhm = config.get("zlp_fwhm_eV", 0.3)
+            zlp_amp = max(10.0, np.max(y) * 10.0 if np.max(y) > 0 else 100.0)
+            y += zlp_profile(x, center=0.0, amplitude=zlp_amp, fwhm=zlp_fwhm)
+
         # ============================================================
         # BACKGROUND GENERATION (Physics-based)
         # ============================================================
@@ -353,12 +440,13 @@ def generate_synthetic_data(
         elif bg_type == "Shirley":
             # Create temporary y with peaks for Shirley estimation
             temp_y = np.copy(y) + np.random.normal(0, 0.5, n_points)
-            bg = shirley_background(x, temp_y, n_iter=5)
+            bg = shirley_background(x, temp_y, n_iter=5, axis_reversed=axis_reversed)
             y += bg
         elif bg_type == "Bremsstrahlung":
             # EDS-style background
             x_min = x_lo
-            bg = bremsstrahlung_background(x, x_min, intensity=np.max(y) * 0.3, k=1.7)
+            E0 = config.get("accelerating_voltage_keV", 20.0)
+            bg = bremsstrahlung_background(x, x_min, intensity=np.max(y) * 0.3, k=1.7, E0=E0)
             y += bg
         elif bg_type == "Polynomial" or "Polynomial" in bg_type:
             # IR / Raman polynomial baseline
@@ -367,8 +455,10 @@ def generate_synthetic_data(
             bg_scaled = bg * np.max(y) * 0.2
             y += bg_scaled
         elif "Power" in bg_type:
-            # Power-law background (AES, EELS)
-            y += 50 * np.exp(-0.001 * (x - x_lo))
+            # Power-law background for AES/EELS using a shifted x-axis to keep values finite.
+            bg_scale = np.max(y) * 0.15 + 2.0
+            x_positive = x - x_lo + 1.0
+            y += power_law_background(x_positive, scale=bg_scale, exponent=-1.6)
         else:
             # Linear baseline (default)
             if not is_transmittance:
@@ -384,16 +474,33 @@ def generate_synthetic_data(
             y = np.clip(y, 0, baseline_level * 1.1)  # keep in reasonable range
         else:
             # Normal noise handling
-            y += np.random.normal(0, gaussian_sigma * np.max(y) * 0.01, n_points)
+            # If AES we are working with a raw signal array
+            if technique == "AES":
+                # add noise to raw signal
+                y_raw += np.random.normal(0, gaussian_sigma * np.max(y_raw + 1e-6) * 0.01, n_points)
+            else:
+                y += np.random.normal(0, gaussian_sigma * np.max(y) * 0.01, n_points)
             # Poisson shot noise (photon counting statistics)
-            y = np.maximum(y, 0)  # ensure non-negative for Poisson
-            y += np.random.poisson(poisson_lambda / 10000, n_points) / 100
+            if technique == "AES":
+                # Ensure non-negative then add small Poisson-like noise
+                y_raw = np.maximum(y_raw, 0)
+                y_raw += np.random.poisson(poisson_lambda / 10000, n_points) / 100
+            else:
+                y = np.maximum(y, 0)  # ensure non-negative for Poisson
+                y += np.random.poisson(poisson_lambda / 10000, n_points) / 100
         
+        # If AES, convert raw signal to first derivative (dN/dE)
+        if technique == "AES":
+            y = np.gradient(y_raw, x)
+            # normalize derivative scale to be visually comparable to other techniques
+            if np.max(np.abs(y)) > 0:
+                y = y / np.max(np.abs(y)) * (np.max(np.abs(y_raw)) + 1e-12)
+
         # Add slight vertical offset between lines (for multi-line display)
         if not is_transmittance:
             y += (line_id - 1) * np.random.uniform(5, 20)
-        
-        spectra[line_id] = (x, y)
+
+        spectra[line_id] = (x[::-1], y[::-1]) if axis_reversed else (x, y)
         
         # ============================================================
         # TRAILING LINE GENERATION (cross-polarization, high complexity)
@@ -404,7 +511,9 @@ def generate_synthetic_data(
         # or secondary optical correlations.
         
         trailing_probability = min(0.7, data_complexity / 10.0)  # up to 70% chance
-        if data_complexity >= 6 and np.random.random() < trailing_probability:
+        # Do not generate cross-polarization trailing lines for particle techniques
+        allow_trailing = not config.get("particle_technique", True)
+        if data_complexity >= 6 and allow_trailing and np.random.random() < trailing_probability:
             # Create trailing line with same peaks but reduced intensity
             if is_transmittance:
                 y_trailing = np.full_like(x, baseline_level)
@@ -539,7 +648,7 @@ def create_dataframe(spectra: dict, technique: str, material: str = "Unknown") -
     return df
 
 
-def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complexity: int = 5, dpi: int = 100, seed: Optional[int] = None):
+def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complexity: int = 5, dpi: int = 100, seed: Optional[int] = None, blur: bool = True):
     """
     Apply visual degradation effects to rendered spectrum image.
     Severity of degradation is scaled by visual_complexity (1-10).
@@ -558,8 +667,11 @@ def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complex
         Original image DPI (used for scan line calculations)
     seed : int, optional
         Random seed for deterministic degradation (especially for paper grain)
+    blur : bool
+        Whether blur-based degradation should be applied.
+        If False, the image is preserved with pristine visibility.
     """
-    if not low_res_config.get("enabled", True):
+    if not low_res_config.get("enabled", True) or not blur:
         return
     
     # Clamp visual_complexity to valid range
@@ -636,7 +748,11 @@ def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complex
         # Scale JPEG quality: at complexity 1, high quality (95)
         # at complexity 10, use base_jpeg_quality
         jpeg_quality = 95 - (95 - base_jpeg_quality) * degradation_scale
-        img_out.save(fig_path, "JPEG", quality=int(jpeg_quality))
+        buffer = io.BytesIO()
+        img_out.save(buffer, format="JPEG", quality=int(jpeg_quality))
+        buffer.seek(0)
+        img_out = Image.open(buffer).convert("RGB")
+        img_out.save(fig_path, "PNG")
     else:
         img_out.save(fig_path, "PNG")
 
@@ -776,7 +892,7 @@ def plot_spectrum(df: pd.DataFrame, spectra: dict, technique: str, config: dict,
     return (fig, ax)
     
 
-def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: dict = None, visual_complexity: int = 5) -> str:
+def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: dict = None, visual_complexity: int = 5, blur: bool = True) -> str:
     """
     Save spectrum plot with optional visual degradation scaled by visual_complexity.
     
@@ -792,6 +908,9 @@ def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: d
         Low-resolution degradation config (base settings)
     visual_complexity : int
         Visual complexity score (1-10) that scales degradation severity
+    blur : bool
+        Whether blur-based image degradation is enabled.
+        If False, the image remains pristine.
     
     Returns
     -------
@@ -808,8 +927,17 @@ def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: d
     
     # Apply visual degradation scaled by visual_complexity
     if low_res_config and low_res_config.get("enabled", False):
-        apply_visual_degradation(png_filename, low_res_config, visual_complexity=visual_complexity, dpi=100)
-        print(f"✓ Visual degradation applied (complexity {visual_complexity}/10): {png_filename}")
+        apply_visual_degradation(
+            png_filename,
+            low_res_config,
+            visual_complexity=visual_complexity,
+            dpi=100,
+            blur=blur,
+        )
+        if blur:
+            print(f"✓ Visual degradation applied (complexity {visual_complexity}/10): {png_filename}")
+        else:
+            print(f"✓ Blur disabled, pristine image saved: {png_filename}")
     
     return png_filename
 
@@ -826,6 +954,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-vis", type=int, default=10, help="Maximum visual complexity (1-10)")
     parser.add_argument("--min-data", type=int, default=1, help="Minimum data complexity (1-10)")
     parser.add_argument("--max-data", type=int, default=10, help="Maximum data complexity (1-10)")
+    parser.add_argument("--blur", dest="blur", action="store_true", default=True, help="Enable blur-based visual degradation")
+    parser.add_argument("--no-blur", dest="blur", action="store_false", help="Disable all blur surface degradation and keep plot pristine")
     
     args = parser.parse_args()
     
@@ -950,7 +1080,8 @@ if __name__ == "__main__":
         technique,
         index=args.index,
         low_res_config=style.get("low_res", {}),
-        visual_complexity=target_visual_complexity
+        visual_complexity=target_visual_complexity,
+        blur=args.blur,
     )
     
     plt.close(fig)
