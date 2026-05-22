@@ -128,8 +128,9 @@ def main():
             # Pattern: spectrum_*_multiline_{i}.*
             png_matches = glob.glob(f"spectrum_*_multiline_{i}.png")
             csv_matches = glob.glob(f"spectrum_data_*_multiline_{i}.csv")
-            
-            for file in png_matches + csv_matches:
+            schema_matches = glob.glob(f"spectrum_data_*_multiline_{i}_dataset_schema.md")
+
+            for file in png_matches + csv_matches + schema_matches:
                 try:
                     new_path = os.path.join(batch_folder, file)
                     os.rename(file, new_path)

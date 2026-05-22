@@ -19,9 +19,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import special, ndimage
+from scipy.signal import find_peaks, peak_widths, savgol_filter
 from PIL import Image
 import io
 import random
+import json
 import argparse
 from typing import Optional
 from SpectDict import ESI_CONFIG, PLOT_STYLE_CONFIG, PEAK_LIBRARY
@@ -296,7 +298,7 @@ def generate_synthetic_data(
         n_points = len(x)
     axis_reversed = config.get("axis_reversed", False)
     
-    # Get noise parameters
+    # Get noise parameters (kept conservative to preserve peak visibility)
     noise = config.get("noise_profile", {})
     gaussian_sigma = noise.get("gaussian_sigma", 0.1)
     poisson_lambda = noise.get("poisson_lambda", 1000)
@@ -423,7 +425,8 @@ def generate_synthetic_data(
         # ============================================================
         if technique == "EELS":
             zlp_fwhm = config.get("zlp_fwhm_eV", 0.3)
-            zlp_amp = max(10.0, np.max(y) * 10.0 if np.max(y) > 0 else 100.0)
+            # ZLP should be prominent but not completely drown core-loss peaks
+            zlp_amp = max(5.0, np.max(y) * 3.0 if np.max(y) > 0 else 50.0)
             y += zlp_profile(x, center=0.0, amplitude=zlp_amp, fwhm=zlp_fwhm)
 
         # ============================================================
@@ -460,9 +463,12 @@ def generate_synthetic_data(
             x_positive = x - x_lo + 1.0
             y += power_law_background(x_positive, scale=bg_scale, exponent=-1.6)
         else:
-            # Linear baseline (default)
+            # Linear baseline (default) scaled relative to peak amplitude so it
+            # doesn't dwarf peaks when peaks are small
             if not is_transmittance:
-                y += np.linspace(5, 20, n_points)
+                base_min = max(0.5, np.max(y) * 0.005)
+                base_max = max(1.0, np.max(y) * 0.02)
+                y += np.linspace(base_min, base_max, n_points)
         
         # ============================================================
         # NOISE ADDITION (Realistic detector & photon noise)
@@ -470,24 +476,23 @@ def generate_synthetic_data(
         
         if is_transmittance:
             # For transmittance, noise is relative to baseline (1.0)
-            y += np.random.normal(0, gaussian_sigma * baseline_level * 0.005, n_points)
-            y = np.clip(y, 0, baseline_level * 1.1)  # keep in reasonable range
+            # Keep noise small so dips remain clear for training
+            y += np.random.normal(0, gaussian_sigma * baseline_level * 0.0025, n_points)
+            y = np.clip(y, 0, baseline_level * 1.05)  # keep in reasonable range
         else:
-            # Normal noise handling
-            # If AES we are working with a raw signal array
+            # Normal noise handling (reduced amplitude to preserve peaks)
             if technique == "AES":
-                # add noise to raw signal
-                y_raw += np.random.normal(0, gaussian_sigma * np.max(y_raw + 1e-6) * 0.01, n_points)
+                # add noise to raw signal (smaller factor)
+                y_raw += np.random.normal(0, gaussian_sigma * np.max(y_raw + 1e-6) * 0.005, n_points)
             else:
-                y += np.random.normal(0, gaussian_sigma * np.max(y) * 0.01, n_points)
-            # Poisson shot noise (photon counting statistics)
+                y += np.random.normal(0, gaussian_sigma * max(np.max(y), 1.0) * 0.005, n_points)
+            # Poisson shot noise (reduced)
             if technique == "AES":
-                # Ensure non-negative then add small Poisson-like noise
                 y_raw = np.maximum(y_raw, 0)
-                y_raw += np.random.poisson(poisson_lambda / 10000, n_points) / 100
+                y_raw += np.random.poisson(max(1, int(poisson_lambda / 50000)), n_points) / 200
             else:
-                y = np.maximum(y, 0)  # ensure non-negative for Poisson
-                y += np.random.poisson(poisson_lambda / 10000, n_points) / 100
+                y = np.maximum(y, 0)
+                y += np.random.poisson(max(1, int(poisson_lambda / 50000)), n_points) / 200
         
         # If AES, convert raw signal to first derivative (dN/dE)
         if technique == "AES":
@@ -601,12 +606,12 @@ def generate_synthetic_data(
             
             # Add noise
             if is_transmittance:
-                y_trailing += np.random.normal(0, gaussian_sigma * baseline_level * 0.003, n_points)
-                y_trailing = np.clip(y_trailing, 0, baseline_level * 1.1)
+                y_trailing += np.random.normal(0, gaussian_sigma * baseline_level * 0.002, n_points)
+                y_trailing = np.clip(y_trailing, 0, baseline_level * 1.05)
             else:
-                y_trailing += np.random.normal(0, gaussian_sigma * np.max(y_trailing) * 0.01, n_points)
+                y_trailing += np.random.normal(0, gaussian_sigma * max(np.max(y_trailing),1.0) * 0.005, n_points)
                 y_trailing = np.maximum(y_trailing, 0)
-                y_trailing += np.random.poisson(poisson_lambda / 20000, n_points) / 100
+                y_trailing += np.random.poisson(max(1, int(poisson_lambda / 100000)), n_points) / 200
             
             # Store trailing line with special key
             spectra["{0}_trailing".format(line_id)] = (x, y_trailing)
@@ -633,19 +638,269 @@ def create_dataframe(spectra: dict, technique: str, material: str = "Unknown") -
         DataFrame with columns: energy, intensity, line_id, technique, material
     """
     records = []
-    
+
+    # Detect peaks for metadata export (top 6 per line)
+    peaks_map = get_peaks_for_spectra(spectra, technique, ESI_CONFIG.get(technique, {}), top_n=6)
+
     for line_id, (x, y) in spectra.items():
+        # Prepare flattened peak columns for this line
+        peaks = peaks_map.get(line_id, [])
+        # Build JSON-serializable metadata list
+        peak_meta = []
+        for p in peaks:
+            peak_meta.append({
+                "position": p.get("position"),
+                "amplitude": p.get("amplitude"),
+                "fwhm": p.get("fwhm"),
+            })
+
+        # Flatten first 6 peaks into dedicated columns (peak_1_position, etc.)
+        flat = {}
+        for idx in range(6):
+            if idx < len(peaks):
+                flat[f"peak_{idx+1}_position"] = peaks[idx].get("position")
+                flat[f"peak_{idx+1}_amplitude"] = peaks[idx].get("amplitude")
+                flat[f"peak_{idx+1}_fwhm"] = peaks[idx].get("fwhm")
+            else:
+                flat[f"peak_{idx+1}_position"] = None
+                flat[f"peak_{idx+1}_amplitude"] = None
+                flat[f"peak_{idx+1}_fwhm"] = None
+
         for energy, intensity in zip(x, y):
-            records.append({
+            rec = {
                 "energy": energy,
                 "intensity": intensity,
                 "line_id": line_id,
                 "technique": technique,
                 "material": material,
-            })
-    
+                "peak_metadata": json.dumps(peak_meta),
+            }
+            rec.update(flat)
+            records.append(rec)
+
     df = pd.DataFrame(records)
     return df
+
+
+def detect_peaks(x: np.ndarray, y: np.ndarray, prominence: float = None, width: float = None):
+    """Detect peaks and estimate positions, amplitudes, and FWHM.
+
+    Returns a list of dicts: {'position','amplitude','fwhm','left_ips','right_ips'}
+    """
+    if prominence is None:
+        # set heuristic prominence based on RMS noise
+        prominence = max( np.std(y) * 5.0, (np.max(y) - np.min(y)) * 0.02 )
+    # find peaks (works for positive peaks); for derivative-like signals, caller should pass abs(y)
+    peaks_idx, props = find_peaks(y, prominence=prominence)
+    results = []
+    if len(peaks_idx) == 0:
+        return results
+
+    # estimate widths at half prominence using scipy.signal.peak_widths
+    widths_results = peak_widths(y, peaks_idx, rel_height=0.5)
+    # widths_results: (widths, h_eval, left_ips, right_ips)
+
+    for i, pk in enumerate(peaks_idx):
+        pos = float(x[pk])
+        amp = float(y[pk])
+        w = float(widths_results[0][i]) if widths_results[0].size > i else 0.0
+        left_ip = float(widths_results[2][i]) if widths_results[2].size > i else np.nan
+        right_ip = float(widths_results[3][i]) if widths_results[3].size > i else np.nan
+        # convert width in samples to FWHM in x-units
+        fwhm = w * (x[1] - x[0]) if w > 0 else 0.0
+        results.append({
+            "position": pos,
+            "amplitude": amp,
+            "fwhm": fwhm,
+            "left_ips": left_ip,
+            "right_ips": right_ip,
+        })
+
+    # Sort by amplitude descending
+    results = sorted(results, key=lambda r: abs(r['amplitude']), reverse=True)
+    return results
+
+
+def baseline_subtract(x: np.ndarray, y: np.ndarray, method: str = 'savgol', **kwargs):
+    """Compute a baseline to subtract for display purposes.
+
+    Methods supported: 'savgol' (savitzky-golay smoothing), 'poly' (polynomial fit),
+    'median' (median filter).
+    Returns baseline array and y_corrected = y - baseline.
+    """
+    method = method.lower()
+    if method == 'savgol':
+        # window length must be odd and <= len(y)
+        window = int(kwargs.get('window', min(101, len(y) // 5 * 2 + 1)))
+        if window >= len(y):
+            window = len(y) - 1 if len(y) % 2 == 0 else len(y)
+        if window % 2 == 0:
+            window = max(3, window - 1)
+        polyorder = min(3, max(1, int(kwargs.get('polyorder', 2))))
+        try:
+            baseline = savgol_filter(y, window_length=window, polyorder=polyorder)
+        except Exception:
+            baseline = np.full_like(y, np.median(y))
+    elif method == 'poly':
+        deg = int(kwargs.get('deg', 2))
+        coeffs = np.polyfit(x, y, deg)
+        baseline = np.polyval(coeffs, x)
+    else:
+        # median filter fallback
+        from scipy.ndimage import median_filter
+        size = int(kwargs.get('size', max(3, len(y) // 50)))
+        baseline = median_filter(y, size=size)
+
+    y_corrected = y - baseline
+    return baseline, y_corrected
+
+
+def get_peaks_for_spectra(spectra: dict, technique: str, config: dict, top_n: int = 5):
+    """Detect peaks for each line in spectra and return a dict mapping line_id -> peaks list."""
+    peaks_by_line = {}
+    for line_id, (x, y) in spectra.items():
+        x = np.array(x)
+        y = np.array(y)
+        # Choose baseline subtraction and search strategy per technique
+        tech = technique.upper()
+        if tech == 'AES':
+            # AES is derivative-like: detect on absolute value after smoothing
+            baseline, y_corr = baseline_subtract(x, y, method='savgol', window=max(11, len(y)//200))
+            search_y = ndimage.gaussian_filter(np.abs(y_corr), sigma=2.0)
+            prominence = max(np.std(search_y) * 3.0, (np.max(search_y)-np.min(search_y)) * 0.01)
+        elif tech == 'XPS':
+            # XPS often needs smooth baseline removed; use savgol then detect
+            baseline, y_corr = baseline_subtract(x, y, method='savgol', window=max(31, len(y)//100))
+            search_y = ndimage.gaussian_filter(y_corr, sigma=1.5)
+            prominence = max(np.std(search_y) * 2.0, (np.max(search_y)-np.min(search_y)) * 0.005)
+        elif tech == 'EDS':
+            # EDS continuum dominates; subtract a robust median baseline
+            baseline, y_corr = baseline_subtract(x, y, method='median', size=max(3, len(y)//200))
+            search_y = ndimage.gaussian_filter(y_corr, sigma=1.0)
+            prominence = max(np.std(search_y) * 2.5, (np.max(search_y)-np.min(search_y)) * 0.01)
+        elif tech == 'EELS':
+            # EELS has ZLP at zero; subtract a low-degree polynomial pre-edge
+            baseline, y_corr = baseline_subtract(x, y, method='poly', deg=2)
+            search_y = ndimage.gaussian_filter(y_corr, sigma=1.2)
+            prominence = max(np.std(search_y) * 2.0, (np.max(search_y)-np.min(search_y)) * 0.01)
+        else:
+            baseline, y_corr = baseline_subtract(x, y, method='savgol')
+            search_y = ndimage.gaussian_filter(y_corr, sigma=1.0)
+            prominence = None
+
+        peaks = detect_peaks(x, search_y, prominence=prominence)
+        peaks_by_line[line_id] = peaks[:top_n]
+    return peaks_by_line
+
+
+def plot_focus_regions(spectra: dict, technique: str, config: dict, style: dict, n_peaks: int = 3, window_factor: float = 3.0, out_dir: str = None):
+    """Create focused zoom plots around top peaks for each line.
+
+    Saves per-peak PNGs in `out_dir` or current folder. Returns list of saved filenames.
+    """
+    import os
+    saved = []
+    peaks_map = get_peaks_for_spectra(spectra, technique, config, top_n=n_peaks)
+    vs = style['visual_style']
+    lr = style['low_res']
+
+    if out_dir is None:
+        out_dir = os.getcwd()
+    os.makedirs(out_dir, exist_ok=True)
+
+    for line_id, (x, y) in list(spectra.items()):
+        x = np.array(x)
+        y = np.array(y)
+        peaks = peaks_map.get(line_id, [])
+        for i, pk in enumerate(peaks):
+            center = pk['position']
+            fwhm = pk['fwhm'] if pk['fwhm'] > 0 else ( (x[-1]-x[0]) / 100.0 )
+            half_width = max(abs(fwhm * window_factor), (x[-1] - x[0]) * 0.01)
+            x_min = center - half_width
+            x_max = center + half_width
+
+            # create plot similar to plot_spectrum but zoomed
+            fig, ax = plt.subplots(figsize=(8, 4), dpi=120)
+            ax.plot(x, y, color=vs.get('line_color', '#1A3A6B'), linewidth=vs.get('line_width', 1.2))
+            ax.set_xlim(x_min, x_max)
+
+            # set y-limits to show peak clearly
+            local_mask = (x >= x_min) & (x <= x_max)
+            if np.any(local_mask):
+                y_local = y[local_mask]
+                y_min = np.min(y_local)
+                y_max = np.max(y_local)
+                yrange = max(1e-6, y_max - y_min)
+                ax.set_ylim(y_min - 0.1 * yrange, y_max + 0.2 * yrange)
+
+            ax.set_title(f"{technique} — Line {line_id} Peak {i+1} @ {center:.3g}")
+            ax.set_xlabel(f"{config.get('x_axis','Energy')} ({config.get('x_units','a.u.')})")
+            ax.set_ylabel(f"{config.get('y_axis','Intensity')} ({config.get('y_units','a.u.')})")
+            plt.tight_layout()
+
+            fname = os.path.join(out_dir, f"{technique.lower()}_line{line_id}_peak{i+1}.png")
+            fig.savefig(fname, dpi=150)
+            plt.close(fig)
+            saved.append(fname)
+
+    return saved
+
+
+def plot_before_after_comparison(spectra: dict, technique: str, config: dict, style: dict, n_peaks: int = 3, window_factor: float = 3.0, out_dir: str = None):
+    """Create side-by-side before/after comparison images for top peaks.
+
+    Left: raw zoomed region. Right: baseline-subtracted, annotated with peak position and FWHM.
+    """
+    import os
+    saved = []
+    peaks_map = get_peaks_for_spectra(spectra, technique, config, top_n=n_peaks)
+    vs = style.get('visual_style', {}) if isinstance(style, dict) else {}
+
+    if out_dir is None:
+        out_dir = os.getcwd()
+    os.makedirs(out_dir, exist_ok=True)
+
+    for line_id, (x, y) in list(spectra.items()):
+        x = np.array(x)
+        y = np.array(y)
+        peaks = peaks_map.get(line_id, [])
+        for i, pk in enumerate(peaks):
+            center = pk['position']
+            fwhm = pk['fwhm'] if pk['fwhm'] > 0 else ((x[-1]-x[0]) / 100.0)
+            half_width = max(abs(fwhm * window_factor), (x[-1] - x[0]) * 0.01)
+            x_min = center - half_width
+            x_max = center + half_width
+
+            # compute baseline-subtracted data for 'after' panel
+            baseline, y_corr = baseline_subtract(x, y, method='savgol')
+
+            fig, axs = plt.subplots(1, 2, figsize=(12, 4), dpi=120)
+
+            # Before (raw)
+            axs[0].plot(x, y, color=vs.get('line_color', '#333333'), linewidth=vs.get('line_width', 1.0))
+            axs[0].set_xlim(x_min, x_max)
+            axs[0].set_title(f"Before — Line {line_id} Peak {i+1} @ {center:.3g}")
+            axs[0].set_xlabel(f"{config.get('x_axis','Energy')} ({config.get('x_units','a.u.')})")
+            axs[0].set_ylabel(f"{config.get('y_axis','Intensity')} ({config.get('y_units','a.u.')})")
+
+            # After (baseline-subtracted & annotated)
+            axs[1].plot(x, y_corr, color=vs.get('highlight_color', '#B22222'), linewidth=vs.get('line_width', 1.2))
+            # overlay baseline for reference (shifted to zero line)
+            axs[1].plot(x, baseline, color='#888888', linestyle='--', linewidth=0.8, alpha=0.7)
+            axs[1].set_xlim(x_min, x_max)
+            # annotate peak and FWHM
+            axs[1].axvline(center, color='k', linestyle=':', linewidth=1.0)
+            axs[1].text(center, np.max(y_corr[(x>=x_min)&(x<=x_max)])*0.9, f"{center:.3g}", ha='center', va='top')
+            axs[1].set_title(f"After — Baseline-subtracted")
+            axs[1].set_xlabel(f"{config.get('x_axis','Energy')} ({config.get('x_units','a.u.')})")
+
+            plt.tight_layout()
+            fname = os.path.join(out_dir, f"{technique.lower()}_line{line_id}_peak{i+1}_comparison.png")
+            fig.savefig(fname, dpi=150)
+            plt.close(fig)
+            saved.append(fname)
+
+    return saved
 
 
 def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complexity: int = 5, dpi: int = 100, seed: Optional[int] = None, blur: bool = True):
@@ -692,10 +947,11 @@ def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complex
     img = Image.open(fig_path).convert("RGB")
     img_array = np.array(img, dtype=np.float32) / 255.0
     
-    # ====== BLUR (scaled) ======
+    # ====== BLUR (scaled, conservative) ======
     base_blur_sigma = low_res_config.get("blur_sigma_px", 0.0)
-    blur_sigma = base_blur_sigma * degradation_scale
-    if blur_sigma > 0.1:  # Apply only if noticeable
+    # reduce blur impact to preserve peak sharpness
+    blur_sigma = base_blur_sigma * (degradation_scale * 0.6)
+    if blur_sigma > 0.05:  # Apply only if noticeable
         for ch in range(3):
             img_array[:, :, ch] = ndimage.gaussian_filter(img_array[:, :, ch], sigma=blur_sigma)
     
@@ -704,6 +960,8 @@ def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complex
     # Scale downsampling: at complexity 1, use 1 (no downsampling)
     # at complexity 10, use full base_downsample
     downsample_factor = int(1 + (base_downsample - 1) * degradation_scale)
+    # Cap downsample to avoid obliterating peaks
+    downsample_factor = min(downsample_factor, max(1, int(base_downsample)))
     
     if downsample_factor > 1:
         h, w = img_array.shape[:2]
@@ -734,7 +992,8 @@ def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complex
     
     # ====== PAPER GRAIN (IR, scaled) ======
     if degradation_scale > 0.1 and low_res_config.get("paper_grain", False):
-        grain_sigma = low_res_config.get("paper_grain_sigma", 1.5) * degradation_scale
+        # Reduce grain strength so features remain recognizable
+        grain_sigma = max(0.5, low_res_config.get("paper_grain_sigma", 1.5) * (degradation_scale * 0.4))
         grain = np.random.normal(0, grain_sigma / 255.0, img_array.shape)
         img_array = np.clip(img_array + grain, 0, 1)
     
@@ -744,10 +1003,9 @@ def apply_visual_degradation(fig_path: str, low_res_config: dict, visual_complex
     img_out = Image.fromarray(img_array)
     
     base_jpeg_quality = low_res_config.get("jpeg_quality", None)
-    if base_jpeg_quality is not None and base_jpeg_quality < 95:
-        # Scale JPEG quality: at complexity 1, high quality (95)
-        # at complexity 10, use base_jpeg_quality
-        jpeg_quality = 95 - (95 - base_jpeg_quality) * degradation_scale
+    if base_jpeg_quality is not None and base_jpeg_quality < 90:
+        # Scale JPEG quality conservatively: do not degrade aggressively
+        jpeg_quality = 95 - (95 - base_jpeg_quality) * degradation_scale * 0.6
         buffer = io.BytesIO()
         img_out.save(buffer, format="JPEG", quality=int(jpeg_quality))
         buffer.seek(0)
@@ -922,8 +1180,27 @@ def save_spectrum_plot(fig, technique: str, index: int = None, low_res_config: d
     else:
         png_filename = f"spectrum_{technique.lower()}_multiline.png"
     
+    # Before saving, remove non-essential text annotations so batch images
+    # contain only plot lines, axes, and grids (no titles, legends, watermarks)
+    for ax in fig.get_axes():
+        # remove title
+        try:
+            ax.set_title("")
+        except Exception:
+            pass
+        # remove legend if present
+        leg = ax.get_legend()
+        if leg is not None:
+            leg.remove()
+        # remove free text (watermarks, annotations), keep axis labels
+        for txt in list(ax.texts):
+            try:
+                txt.remove()
+            except Exception:
+                pass
+
     fig.savefig(png_filename, dpi=100, bbox_inches="tight")
-    print(f"✓ Plot saved (initial): {png_filename}")
+    print(f"✓ Plot saved (initial, clean): {png_filename}")
     
     # Apply visual degradation scaled by visual_complexity
     if low_res_config and low_res_config.get("enabled", False):
@@ -1056,6 +1333,42 @@ if __name__ == "__main__":
         csv_filename = f"spectrum_data_{technique.lower()}_multiline.csv"
     df.to_csv(csv_filename, index=False)
     print(f"\n✓ Data saved: {csv_filename}")
+
+    # ALSO: write dataset schema markdown companion for vision models and downstream parsers
+    schema_path = csv_filename.replace('.csv', '_dataset_schema.md')
+    schema_lines = [
+        f"# Dataset Schema for {csv_filename}",
+        "",
+        "This file documents the CSV layout produced by the synthetic spectrum generator.",
+        "Use this to map visual PNGs to the numeric columns programmatically.",
+        "",
+        "## Column Definitions",
+        "- **energy**: float — X-axis value (units in `x_units` column or in the generator config).",
+        "- **intensity**: float — Measured intensity/counts at the corresponding energy/wavenumber.",
+        "- **line_id**: int|string — Identifier for the spectrum line (multiple lines may be present per file).",
+        "- **technique**: string — Spectroscopy technique (e.g., XPS, AES, EDS, EELS, IR, Raman).",
+        "- **material**: string — Material selection from the `PEAK_LIBRARY` used to inject peaks (or 'Unknown').",
+        "- **peak_metadata**: JSON string — Array of peak objects injected/detected for this `line_id`. Each object: `{position, amplitude, fwhm}`.",
+        "",
+        "## Flattened Peak Columns (first 6 peaks)",
+        "- **peak_1_position**, **peak_1_amplitude**, **peak_1_fwhm**: floats — First (largest) peak for the line. Subsequent `peak_n_*` follow the same pattern up to 6.",
+        "",
+        "## Notes",
+        "- Each row corresponds to a single point on a spectrum; to get per-spectrum metadata, group rows by `line_id`.",
+        "- `peak_metadata` is provided as a JSON string per-row but is identical for all rows sharing the same `line_id` (it describes the line, not the point).",
+        "- PNG visualizations produced by the generator contain only plot lines, axes, and grids (no textual annotations).",
+        "",
+        "## Example JSON `peak_metadata`",
+        "```json",
+        "[{\"position\": 284.5, \"amplitude\": 1.0, \"fwhm\": 0.7}]",
+        "```",
+    ]
+    try:
+        with open(schema_path, 'w') as sf:
+            sf.write('\n'.join(schema_lines))
+        print(f"\n✓ Dataset schema written: {schema_path}")
+    except Exception as e:
+        print(f"Warning: could not write dataset schema: {e}")
     
     # Display line summary (handle both int and string line IDs)
     print(f"\nLine Summary:")
