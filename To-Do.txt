@@ -1,0 +1,3 @@
+Need to fix FTIR and RAMAN examples. Currently they are buns.
+
+Other graphs are looking workable for now

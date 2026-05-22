@@ -52,6 +52,20 @@ def main():
         print("Please enter a positive integer.")
         sys.exit(1)
     
+
+    # Prompt for blur behavior
+    while True:
+        print("\nEnable blur-based visual degradation? [Y/n] (Enter for default Yes):")
+        blur_input = input("→ ").strip().lower()
+        if blur_input == "" or blur_input in ("y", "yes"):
+            blur_choice = True
+            break
+        if blur_input in ("n", "no"):
+            blur_choice = False
+            break
+        print("Invalid input. Please enter 'y' or 'n'.")
+
+        
     # Get visual complexity range
     while True:
         print("\nEnter Visual Complexity range (1-10) [Press Enter for default 1,10]:")
@@ -74,6 +88,8 @@ def main():
     avg_vis = (min_vis + max_vis) / 2.0
     avg_data = (min_data + max_data) / 2.0
     
+    
+
     # Create batch folder with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     batch_folder = f"batch_vis{avg_vis:.1f}_data{avg_data:.1f}_{timestamp}"
@@ -87,6 +103,7 @@ def main():
     print(f"\nConfiguration Summary:")
     print(f"  Visual Complexity: {min_vis}-{max_vis} (avg: {avg_vis:.1f})")
     print(f"  Data Complexity: {min_data}-{max_data} (avg: {avg_data:.1f})")
+    print(f"  Blur degradation: {'Enabled' if blur_choice else 'Disabled'}")
     print(f"  Spectra to generate: {n}")
     print(f"  Output folder: {batch_folder}/")
     
@@ -103,6 +120,7 @@ def main():
                 "--max-vis", str(max_vis),
                 "--min-data", str(min_data),
                 "--max-data", str(max_data),
+                "--blur" if blur_choice else "--no-blur",
             ]
             subprocess.run(cmd, check=True)
             
@@ -110,8 +128,9 @@ def main():
             # Pattern: spectrum_*_multiline_{i}.*
             png_matches = glob.glob(f"spectrum_*_multiline_{i}.png")
             csv_matches = glob.glob(f"spectrum_data_*_multiline_{i}.csv")
-            
-            for file in png_matches + csv_matches:
+            schema_matches = glob.glob(f"spectrum_data_*_multiline_{i}_dataset_schema.md")
+
+            for file in png_matches + csv_matches + schema_matches:
                 try:
                     new_path = os.path.join(batch_folder, file)
                     os.rename(file, new_path)

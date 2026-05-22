@@ -183,6 +183,56 @@ ESI_CONFIG: Dict[str, SpecConfig] = {
         "detector_type"   : "CCD",              # sensitive, cooled detector
         "base_data_complexity": 8,              # high; multiple Raman bands often present
     },
+
+    # -----------------------------------------------------------------------
+    # FTIR — Fourier Transform Infrared Spectroscopy
+    # Absorption spectroscopy; inverted peaks (dips from high baseline).
+    # Typically plotted as Transmittance (T) 0-100% or 0-1.0.
+    # Sharp molecular dips indicate strong absorption.
+    # Background       : Transmittance baseline (starts at ~95-100%).
+    # -----------------------------------------------------------------------
+    "FTIR": {
+        "x_axis"          : "Wavenumber",
+        "y_axis"          : "Transmittance",
+        "x_units"         : "cm⁻¹",
+        "y_units"         : "%T",               # percent transmittance (0-100%)
+        "x_range"         : (400.0, 4000.0),    # cm⁻¹; mid-IR standard region
+        "noise_profile"   : {
+            "gaussian_sigma"  : 1.5,            # cm⁻¹; FT resolution typically ~1-2 cm⁻¹
+            "poisson_lambda"  : 2000.0,         # photon counts from thermal IR source
+        },
+        "background_type" : "Transmittance",    # special flag for inverted mode
+        "peak_shape"      : "Lorentzian",       # IR absorption peaks (lifetime broadened)
+        "detector_type"   : "MCT",              # Mercury Cadmium Telluride (fast, sensitive)
+        "baseline_level"  : 1.0,                # high baseline at 1.0 (100% T)
+        "fwhm_range"      : (2.0, 8.0),         # cm⁻¹; sharp molecular transitions
+        "base_data_complexity": 6,              # moderate-high; functional groups overlap
+    },
+
+    # -----------------------------------------------------------------------
+    # UV-Vis — Ultraviolet-Visible Spectroscopy
+    # Absorption spectroscopy; UV-Vis typically uses Absorbance or Transmittance.
+    # Inverted peaks indicate absorption bands.
+    # Range        : 190 nm - 900 nm (UV to near-IR)
+    # Background   : Transmittance baseline around 0.95-1.0
+    # -----------------------------------------------------------------------
+    "UV-Vis": {
+        "x_axis"          : "Wavelength",
+        "y_axis"          : "Transmittance",
+        "x_units"         : "nm",
+        "y_units"         : "T",                # transmittance (0-1.0 or 0-100%)
+        "x_range"         : (190.0, 900.0),     # nm; UV through near-IR
+        "noise_profile"   : {
+            "gaussian_sigma"  : 0.5,            # nm; instrument resolution
+            "poisson_lambda"  : 5000.0,         # higher photon counts in visible
+        },
+        "background_type" : "Transmittance",    # inverted mode
+        "peak_shape"      : "Gaussian",         # UV-Vis bands often broader (Gaussian)
+        "detector_type"   : "PMT",              # Photomultiplier tube
+        "baseline_level"  : 1.0,                # high baseline
+        "fwhm_range"      : (5.0, 50.0),        # nm; broader than IR
+        "base_data_complexity": 5,              # moderate; electronic transitions less dense
+    },
 }
 
 
@@ -479,6 +529,108 @@ PLOT_STYLE_CONFIG: Dict[str, PlotStyle] = {
             "font_size"         : 9,
             "font_color"        : "#0033AA",
             "font_alpha"        : 0.22,
+            "position"          : "bottom-right",
+            "rotation_deg"      : 0,
+            "logo_path"         : None,
+            "logo_alpha"        : 0.12,
+            "logo_position"     : "top-left",
+        },
+    },
+
+    # -----------------------------------------------------------------------
+    # FTIR — Fourier Transform Infrared with inverted peaks (dips)
+    # -----------------------------------------------------------------------
+    "FTIR": {
+        "figure_width_inches": 12,
+        "figure_height_inches": 6,
+        "dpi": 100,
+        "visual_style": {
+            "line_color"        : "#BB0000",          # red for absorption dips
+            "line_width"        : 1.5,
+            "line_style"        : "-",
+            "trailing_line_style": "--",              # dashed for secondary measurement
+            "marker"            : None,
+            "marker_size"       : 0,
+            "marker_edge_color" : None,
+            "fill_under_curve"  : False,              # no fill for transmittance
+            "fill_alpha"        : 0.0,
+            "fill_color"        : "#FF9999",
+            "grid_visible"      : True,
+            "grid_axis"         : "both",
+            "grid_linestyle"    : "--",
+            "grid_alpha"        : 0.25,
+            "grid_color"        : "#CCCCCC",
+            "background_color"  : "#FAFAFA",
+            "figure_facecolor"  : "#FFFFFF",
+        },
+        "low_res": {
+            "enabled"           : True,
+            "downsample_factor" : 3,
+            "blur_sigma_px"     : 0.8,               # slight optical blur
+            "jpeg_quality"      : 60,
+            "bit_depth"         : 8,
+            "add_scan_lines"    : False,             # FTIR uses continuous detectors
+            "scan_line_spacing" : 0,
+            "scan_line_alpha"   : 0.0,
+            "target_dpi"        : 96,
+        },
+        "watermark": {
+            "enabled"           : True,
+            "text"              : "FTIR — SYNTHETIC / NOT FOR PUBLICATION",
+            "font_size"         : 9,
+            "font_color"        : "#660000",
+            "font_alpha"        : 0.20,
+            "position"          : "bottom-right",
+            "rotation_deg"      : 0,
+            "logo_path"         : None,
+            "logo_alpha"        : 0.12,
+            "logo_position"     : "top-left",
+        },
+    },
+
+    # -----------------------------------------------------------------------
+    # UV-Vis — Ultraviolet-Visible with inverted peaks (absorption dips)
+    # -----------------------------------------------------------------------
+    "UV-Vis": {
+        "figure_width_inches": 12,
+        "figure_height_inches": 6,
+        "dpi": 100,
+        "visual_style": {
+            "line_color"        : "#0066CC",          # blue for electronic absorption
+            "line_width"        : 1.8,
+            "line_style"        : "-",
+            "trailing_line_style": "--",
+            "marker"            : None,
+            "marker_size"       : 0,
+            "marker_edge_color" : None,
+            "fill_under_curve"  : False,
+            "fill_alpha"        : 0.0,
+            "fill_color"        : "#6699FF",
+            "grid_visible"      : True,
+            "grid_axis"         : "both",
+            "grid_linestyle"    : "--",
+            "grid_alpha"        : 0.25,
+            "grid_color"        : "#DDDDDD",
+            "background_color"  : "#FAFBFC",
+            "figure_facecolor"  : "#FFFFFF",
+        },
+        "low_res": {
+            "enabled"           : True,
+            "downsample_factor" : 4,
+            "blur_sigma_px"     : 0.5,               # modest optical blur
+            "jpeg_quality"      : 70,
+            "bit_depth"         : 8,
+            "add_scan_lines"    : False,
+            "scan_line_spacing" : 0,
+            "scan_line_alpha"   : 0.0,
+            "target_dpi"        : 96,
+        },
+        "watermark": {
+            "enabled"           : True,
+            "text"              : "UV-Vis — SYNTHETIC / NOT FOR PUBLICATION",
+            "font_size"         : 9,
+            "font_color"        : "#003366",
+            "font_alpha"        : 0.20,
             "position"          : "bottom-right",
             "rotation_deg"      : 0,
             "logo_path"         : None,

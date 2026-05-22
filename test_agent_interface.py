@@ -9,6 +9,7 @@ import json
 import hashlib
 import os
 import sys
+from PIL import Image
 
 
 def test_determinism():
@@ -131,7 +132,7 @@ def test_metadata_structure():
     # Check sample fields
     required_fields = [
         'sample_id', 'technique', 'material', 'vis_complexity', 'data_complexity',
-        'num_lines', 'trailing_lines', 'num_trailing_lines', 'seed',
+        'blur_enabled', 'num_lines', 'trailing_lines', 'num_trailing_lines', 'seed',
         'csv_path', 'png_path', 'timestamp'
     ]
     
@@ -268,6 +269,42 @@ def test_decoupled_complexity():
     return same_data_different_visual and complex_same_different_visual and different_data_same_visual
 
 
+def test_blur_toggle():
+    """Test that blur can be disabled for pristine image output."""
+    print("\n" + "=" * 70)
+    print("TEST 7: Blur Toggle — Pristine Output When Disabled")
+    print("=" * 70)
+
+    env_pristine = SpectroscopyEnvironment(output_dir='test_blur_toggle_pristine', verbose=False)
+    env_reference = SpectroscopyEnvironment(output_dir='test_blur_toggle_reference', verbose=False)
+    result_pristine = env_pristine.generate_custom_sample(
+        technique='XPS',
+        material='Copper (Cu)',
+        vis_complexity=10,
+        data_complexity=5,
+        blur=False,
+        seed=7000
+    )
+    result_reference = env_reference.generate_custom_sample(
+        technique='XPS',
+        material='Copper (Cu)',
+        vis_complexity=1,
+        data_complexity=5,
+        blur=True,
+        seed=7000
+    )
+
+    same_metadata_flag = (result_pristine['blur_enabled'] is False and result_reference['blur_enabled'] is True)
+    pristine_png_exists = os.path.exists(result_pristine['png_path'])
+    reference_png_exists = os.path.exists(result_reference['png_path'])
+
+    print(f"Blur flag preserved in metadata: {same_metadata_flag} ✓" if same_metadata_flag else f"Blur flag preserved in metadata: {same_metadata_flag} ✗")
+    print(f"Blur-disabled PNG exists: {pristine_png_exists} ✓" if pristine_png_exists else f"Blur-disabled PNG exists: {pristine_png_exists} ✗")
+    print(f"Reference PNG exists: {reference_png_exists} ✓" if reference_png_exists else f"Reference PNG exists: {reference_png_exists} ✗")
+
+    return same_metadata_flag and pristine_png_exists and reference_png_exists
+
+
 def test_trailing_lines():
     """Test trailing line generation at high data complexity."""
     print("\n" + "=" * 70)
@@ -310,7 +347,8 @@ def cleanup():
     import shutil
     test_dirs = [
         'test_det_1', 'test_det_2', 'test_diff_seeds',
-        'test_metadata', 'test_ground_truth', 'test_decoupled', 'test_trailing'
+        'test_metadata', 'test_ground_truth', 'test_decoupled', 'test_trailing',
+        'test_blur_toggle_pristine', 'test_blur_toggle_reference'
     ]
     for d in test_dirs:
         if os.path.exists(d):
@@ -332,6 +370,7 @@ def main():
         results['metadata'] = test_metadata_structure()
         results['ground_truth'] = test_ground_truth_access()
         results['decoupled'] = test_decoupled_complexity()
+        results['blur_toggle'] = test_blur_toggle()
         results['trailing'] = test_trailing_lines()
     finally:
         cleanup()
